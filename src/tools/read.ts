@@ -19,8 +19,16 @@ export const readFileTool: Tool = {
 
   async execute(args) {
     const filePath = String(args.file_path ?? '')
-    const offset = typeof args.offset === 'number' ? args.offset : 1
-    const limit = typeof args.limit === 'number' ? args.limit : 2000
+    // clamp junk arguments: a negative or zero limit would slice backwards and
+    // mislabel a real file as '(empty file)'
+    const offset =
+      typeof args.offset === 'number' && Number.isFinite(args.offset)
+        ? Math.max(1, Math.floor(args.offset))
+        : 1
+    const limit =
+      typeof args.limit === 'number' && Number.isFinite(args.limit)
+        ? Math.max(1, Math.floor(args.limit))
+        : 2000
 
     try {
       const p = expandPath(filePath)
