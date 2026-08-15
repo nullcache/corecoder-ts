@@ -63,6 +63,11 @@ export class Agent {
     for (const t of this.tools) {
       if (t instanceof SubAgentTool) t.parentAgent = this
     }
+
+    // the API bills for the system prompt and tool schemas on every call;
+    // count them as fixed overhead so the compressor's calibration doesn't
+    // underestimate once the conversation gets shrunk (see context.ts)
+    this.context.setFixedOverhead(this.system + '\n' + JSON.stringify(this.toolSchemas()))
   }
 
   private fullMessages(): ChatMessage[] {
