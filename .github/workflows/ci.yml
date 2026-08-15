@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Test (node ${{ matrix.node }} / ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [18, 20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      # npm test = build + run every compiled test; the runner script keeps
+      # node --test working on Node 18 (glob expansion is a Node 21+ feature)
+      - run: npm test
+      - name: Offline demo smoke test
+        run: node dist/src/cli.js --demo
+      - name: CLI version check
+        run: node dist/src/cli.js --version
+
+  package:
+    name: Package hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # prints the tarball contents so a wrong "files" whitelist fails loudly
+      - run: npm pack --dry-run
