@@ -11,8 +11,13 @@ export interface Tool {
     properties: Record<string, { type: string; description: string }>
     required?: string[]
   }
-  /** Run the tool and return a text result. Never throws — errors become strings. */
-  execute(args: Record<string, unknown>): Promise<string>
+  /**
+   * Run the tool and return a text result. Never throws — errors become
+   * strings. Tools may accept an AbortSignal and should throw AbortError
+   * when it fires so a Ctrl+C can cancel long-running work (bash commands,
+   * sub-agents, large directory walks).
+   */
+  execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<string>
 }
 
 /** OpenAI function-calling schema. */

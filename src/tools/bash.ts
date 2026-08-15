@@ -9,7 +9,7 @@
  * - Working directory tracking (cd awareness)
  */
 
-import { exec } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -81,24 +81,94 @@ async function updateCwd(command: string, currentCwd: string): Promise<void> {
   if (changed) trackedCwd = running
 }
 
+// match exec's default maxBuffer so a chatty command can't balloon memory
+const MAX_OUTPUT = 16 * 1024 * 1024
+
+/**
+ * Kill the whole process tree, not just the shell.
+ *
+ * `shell: true` spawns /bin/sh or cmd.exe, and the real command is its child
+ * (grandchild on Windows). A plain kill() takes down only the shell; the
+ * command keeps running and still holds the stdout pipe, so the close event —
+ * and thus Ctrl+C — would wait for it to finish anyway. POSIX spawns detached
+ * (process-group leader), so a negative pid kills the group; Windows has no
+ * groups, so use taskkill /T to walk the tree.
+ */
+function killProcessTree(child: ChildProcess): void {
+  if (!child.pid) return
+  if (process.platform === 'win32') {
+    spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
+    return
+  }
+  try {
+    process.kill(-child.pid, 'SIGTERM')
+  } catch {
+    child.kill() // process group already gone — nothing left to kill
+  }
+}
+
 function runShell(
   command: string,
   cwd: string,
   timeoutMs: number,
-): Promise<{ stdout: string; stderr: string; code: number | null; timedOut: boolean }> {
+  signal?: AbortSignal,
+): Promise<{ stdout: string; stderr: string; code: number | null; timedOut: boolean; truncated: boolean }> {
   return new Promise(resolve => {
+    const child = spawn(command, {
+      cwd,
+      shell: true,
+      windowsHide: true,
+      detached: process.platform !== 'win32', // process-group leader on POSIX
+    })
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+
+    let stdout = ''
+    let stderr = ''
+    let truncated = false
     let timedOut = false
-    const child = exec(
-      command,
-      { cwd, timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, encoding: 'utf8' },
-      (error, stdout, stderr) => {
-        // exec's error covers both non-zero exit and kill-by-timeout
-        if (error && (error as { killed?: boolean }).killed) timedOut = true
-        resolve({ stdout, stderr, code: error ? (error.code as number | null) ?? null : 0, timedOut })
-      },
-    )
+    let settled = false
+
+    const settle = (result: {
+      stdout: string
+      stderr: string
+      code: number | null
+      timedOut: boolean
+      truncated: boolean
+    }) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      resolve(result)
+    }
+
+    const onAbort = () => killProcessTree(child)
+    if (signal?.aborted) {
+      killProcessTree(child)
+    } else {
+      signal?.addEventListener('abort', onAbort, { once: true })
+    }
+
+    const timer = setTimeout(() => {
+      timedOut = true
+      killProcessTree(child)
+    }, timeoutMs)
+
+    // keep consuming even past the cap so the pipe drains and close can fire
+    child.stdout.on('data', (d: string) => {
+      if (stdout.length < MAX_OUTPUT) stdout += d
+      else truncated = true
+    })
+    child.stderr.on('data', (d: string) => {
+      if (stderr.length < MAX_OUTPUT) stderr += d
+      else truncated = true
+    })
     child.on('error', () => {
-      /* spawn failure surfaces through the exec callback's error */
+      /* spawn failure surfaces through 'close' */
+    })
+    child.on('close', code => {
+      settle({ stdout, stderr, code, timedOut, truncated })
     })
   })
 }
@@ -117,7 +187,7 @@ export const bashTool: Tool = {
     required: ['command'],
   },
 
-  async execute(args) {
+  async execute(args, signal?: AbortSignal) {
     const command = String(args.command ?? '')
     const timeout = typeof args.timeout === 'number' ? args.timeout : 120
 
@@ -130,7 +200,16 @@ export const bashTool: Tool = {
     const cwd = trackedCwd ?? process.cwd()
 
     try {
-      const { stdout, stderr, code, timedOut } = await runShell(command, cwd, timeout * 1000)
+      const { stdout, stderr, code, timedOut, truncated } = await runShell(
+        command,
+        cwd,
+        timeout * 1000,
+        signal,
+      )
+      // an abort that fired mid-command (the child was killed) is a
+      // cancellation, not a tool result — throw so the agent treats it as
+      // an interrupt instead of feeding a half-written output to the model
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
       if (timedOut) return `Error: timed out after ${timeout}s`
 
       // track cd commands so the next command runs in the right place
@@ -138,6 +217,7 @@ export const bashTool: Tool = {
 
       let out = stdout
       if (stderr) out += `\n[stderr]\n${stderr}`
+      if (truncated) out += '\n[output truncated at 16MB cap]'
       if (code !== 0) out += `\n[exit code: ${code}]`
       // keep head + tail to preserve the most useful info
       if (out.length > 15_000) {
@@ -145,6 +225,8 @@ export const bashTool: Tool = {
       }
       return out.trim() || '(no output)'
     } catch (e) {
+      // cancellation must propagate as an interrupt, not become a tool result
+      if (e instanceof DOMException && e.name === 'AbortError') throw e
       return `Error running command: ${e}`
     }
   },

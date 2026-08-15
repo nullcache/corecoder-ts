@@ -35,7 +35,7 @@ export class SubAgentTool implements Tool {
   /** Set by Agent's constructor after construction. */
   parentAgent: Agent | null = null
 
-  async execute(args: Record<string, unknown>): Promise<string> {
+  async execute(args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
     if (!this.parentAgent) return 'Error: agent tool not initialized (no parent agent)'
 
     // dynamic import to avoid a circular dependency at module load time
@@ -51,14 +51,17 @@ export class SubAgentTool implements Tool {
     })
 
     try {
-      // drain the sub-agent's event stream; only its final answer matters here
-      let result = await drain(sub.chat(String(args.task ?? '')))
+      // drain the sub-agent's event stream; only its final answer matters here.
+      // The parent's signal flows through so Ctrl+C cancels a runaway sub-agent.
+      let result = await drain(sub.chat(String(args.task ?? ''), signal))
       // trim long results to avoid blowing up the parent's context
       if (result.length > 5000) {
         result = result.slice(0, 4500) + '\n... (sub-agent output truncated)'
       }
       return `[Sub-agent completed]\n${result}`
     } catch (e) {
+      // cancellation of the sub-agent is an interrupt, not a failure to report
+      if (e instanceof DOMException && e.name === 'AbortError') throw e
       return `Sub-agent error: ${e}`
     }
   }
