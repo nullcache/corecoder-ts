@@ -117,6 +117,7 @@ export async function main(): Promise<void> {
     baseUrl: config.baseUrl,
     temperature: config.temperature,
     max_tokens: config.maxTokens,
+    timeoutMs: config.timeoutMs,
   })
   const agent = new Agent({ llm, maxContextTokens: config.maxContextTokens })
 
