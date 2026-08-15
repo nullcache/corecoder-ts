@@ -90,7 +90,7 @@ parent directory works too, without overriding variables already set):
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `CORECODER_API_KEY` | — | API key (checked in that order) |
+| `CORECODER_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` | — | API key (first one set wins) |
 | `OPENAI_BASE_URL` / `CORECODER_BASE_URL` | OpenAI | API base URL |
 | `CORECODER_MODEL` | `gpt-5.5` | Model name |
 | `CORECODER_MAX_TOKENS` | `4096` | `max_tokens` sent to the API |
@@ -111,7 +111,7 @@ parent directory works too, without overriding variables already set):
 | `/sessions` | List saved sessions |
 | `quit` / `exit` | Leave the REPL |
 
-`Ctrl+C` cancels the current turn (including a running bash command); `Ctrl+C` at the prompt exits.
+`Ctrl+C` cancels the current turn; `Ctrl+C` at the prompt exits.
 
 ## Tools
 
@@ -139,8 +139,8 @@ user message -> LLM (with tools) -> tool calls? -> execute -> loop
 `Agent.chat()` is an async generator: it yields `AgentEvent`s (`text` deltas, `tool_start`/`tool_end`)
 for live rendering, and *returns* the model's final text answer. Tool calls are executed — in
 parallel when there are several — and their results are fed back as `tool` messages until the model
-replies with plain text. Cancellation flows through an `AbortSignal` from the UI all the way into
-running tool processes.
+replies with plain text. Cancellation flows through an `AbortSignal`, so a ^C stops the current turn
+without leaving a half-answered message behind.
 
 ### The LLM layer (`src/llm.ts`)
 
@@ -185,7 +185,7 @@ for await (const event of agent.chat('list every TODO in this project')) {
 
 ```bash
 npm install
-npm test        # tsc build + node --test (all platforms, Node 18+)
+npm test        # tsc build + run the test suite
 npm run demo    # offline demo with a scripted model
 ```
 
