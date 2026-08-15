@@ -20,11 +20,21 @@ const SKIP_DIRS = new Set([
 const MAX_FILES = 5000
 const MAX_MATCHES = 200
 
-async function collectFiles(root: string, include?: string): Promise<string[]> {
+async function collectFiles(
+  root: string,
+  include?: string,
+): Promise<{ files: string[]; truncated: boolean }> {
   const includeRe = include ? globToRegExp(include.includes('/') ? include : `**/${include}`) : null
-  const results: string[] = []
+  const files: string[] = []
   const stack = ['']
-  while (stack.length > 0 && results.length < MAX_FILES) {
+  let truncated = false
+  while (stack.length > 0) {
+    if (files.length >= MAX_FILES) {
+      // stop collecting but tell the caller — a silent cap would make a
+      // huge tree look like it simply has nothing matching
+      truncated = true
+      break
+    }
     const relDir = stack.pop()!
     let entries
     try {
@@ -37,12 +47,11 @@ async function collectFiles(root: string, include?: string): Promise<string[]> {
       if (entry.isDirectory()) {
         if (!SKIP_DIRS.has(entry.name)) stack.push(rel)
       } else if (entry.isFile()) {
-        if (!includeRe || includeRe.test(rel)) results.push(path.join(root, rel))
-        if (results.length >= MAX_FILES) break
+        if (!includeRe || includeRe.test(rel)) files.push(path.join(root, rel))
       }
     }
   }
-  return results
+  return { files, truncated }
 }
 
 export const grepTool: Tool = {
@@ -74,7 +83,9 @@ export const grepTool: Tool = {
     const stat = await fs.stat(base).catch(() => null)
     if (!stat) return `Error: ${searchPath} not found`
 
-    const files = stat.isFile() ? [base] : await collectFiles(base, include)
+    const { files, truncated } = stat.isFile()
+      ? { files: [base], truncated: false }
+      : await collectFiles(base, include)
 
     const matches: string[] = []
     for (const fp of files) {
@@ -97,6 +108,12 @@ export const grepTool: Tool = {
       }
     }
 
+    if (truncated) {
+      // say the search was capped even when nothing matched, so the model
+      // doesn't conclude "no matches" from an incomplete search
+      if (matches.length === 0) return `No matches found (search capped at ${MAX_FILES} files).`
+      matches.push(`... (search capped at ${MAX_FILES} files, results truncated)`)
+    }
     return matches.length > 0 ? matches.join('\n') : 'No matches found.'
   },
 }

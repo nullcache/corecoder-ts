@@ -47,10 +47,19 @@ export function globToRegExp(pattern: string): RegExp {
 const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build'])
 const MAX_WALK = 20_000
 
-async function walk(root: string): Promise<Array<{ rel: string; abs: string; mtime: number }>> {
-  const results: Array<{ rel: string; abs: string; mtime: number }> = []
+async function walk(
+  root: string,
+): Promise<{ files: Array<{ rel: string; abs: string; mtime: number }>; truncated: boolean }> {
+  const files: Array<{ rel: string; abs: string; mtime: number }> = []
   const stack = ['']
-  while (stack.length > 0 && results.length < MAX_WALK) {
+  let truncated = false
+  while (stack.length > 0) {
+    if (files.length >= MAX_WALK) {
+      // stop walking but tell the caller the result is incomplete — a silent
+      // cap would look like the repo simply has no more matching files
+      truncated = true
+      break
+    }
     const relDir = stack.pop()!
     const absDir = path.join(root, relDir)
     let entries
@@ -70,11 +79,11 @@ async function walk(root: string): Promise<Array<{ rel: string; abs: string; mti
         } catch {
           // stat raced with deletion; keep the entry with mtime 0
         }
-        results.push({ rel, abs: path.join(root, rel), mtime })
+        files.push({ rel, abs: path.join(root, rel), mtime })
       }
     }
   }
-  return results
+  return { files, truncated }
 }
 
 export const globTool: Tool = {
@@ -100,7 +109,8 @@ export const globTool: Tool = {
       if (!stat?.isDirectory()) return `Error: ${searchPath} is not a directory`
 
       const regex = globToRegExp(pattern)
-      const hits = (await walk(base)).filter(f => regex.test(f.rel))
+      const { files, truncated } = await walk(base)
+      const hits = files.filter(f => regex.test(f.rel))
 
       // sort by mtime, newest first
       hits.sort((a, b) => b.mtime - a.mtime)
@@ -108,6 +118,7 @@ export const globTool: Tool = {
       const total = hits.length
       const shown = hits.slice(0, 100)
       let result = shown.map(h => h.abs).join('\n')
+      if (truncated) result += `\n... (search capped at ${MAX_WALK} files, results truncated)`
       if (total > 100) result += `\n... (${total} matches, showing first 100)`
       return result || 'No files matched.'
     } catch (e) {
