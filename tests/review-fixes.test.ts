@@ -275,3 +275,38 @@ test('abandoning chat() during text streaming closes the SSE connection', async 
     globalThis.fetch = originalFetch
   }
 })
+
+test('usage received before an abort is still booked — complete ledger, real numbers', async () => {
+  // timeline: the complete usage chunk arrives, then the connection dies
+  // before [DONE]. The finally must book the numbers, not just skip the
+  // incomplete mark — otherwise the ledger claims completeness with 0s.
+  let controllerRef: ReadableStreamDefaultController<Uint8Array> | undefined
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controllerRef = controller
+      controller.enqueue(
+        new TextEncoder().encode(
+          'data: {"id":"1","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2}}\n\n',
+        ),
+      )
+      // never send [DONE]
+    },
+  })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = (async () =>
+    new Response(body, { headers: { 'content-type': 'text/event-stream' } })) as typeof fetch
+  try {
+    const llm = new LLM({ model: 'm', apiKey: 'k' })
+    const ac = new AbortController()
+    const turn = drain(llm.chat([{ role: 'user', content: 'hi' }], undefined, ac.signal))
+    setTimeout(() => ac.abort(), 100)
+    await assert.rejects(turn, (e: Error) => e.name === 'AbortError')
+    assert.equal(llm.usageSeen, true)
+    assert.equal(llm.usageMissed, false, 'complete usage arrived — the ledger is not incomplete')
+    assert.equal(llm.totalPromptTokens, 5, 'the received numbers must be booked despite the abort')
+    assert.equal(llm.totalCompletionTokens, 2)
+    void controllerRef
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})

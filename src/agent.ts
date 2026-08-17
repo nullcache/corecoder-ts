@@ -66,8 +66,8 @@ export class Agent {
     }
 
     // the API bills for the system prompt and tool schemas on every call;
-    // count them as fixed overhead so the compressor's calibration doesn't
-    // underestimate once the conversation gets shrunk (see context.ts)
+    // count them as fixed overhead so the static estimate doesn't
+    // undersize requests once the conversation gets shrunk (see context.ts)
     this.context.setFixedOverhead(this.system + '\n' + JSON.stringify(this.toolSchemas()))
   }
 

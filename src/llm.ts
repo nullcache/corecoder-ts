@@ -242,12 +242,17 @@ export class LLM implements LLMClient {
         }
       }
     } finally {
-      // Runs on normal completion AND on teardown (abort, consumer
-      // .return(), stream error): a request whose stream started but never
-      // delivered complete usage numbers permanently marks the running
-      // totals as incomplete. Placed in a finally because code after the
-      // loop simply never executes when the generator is torn down.
-      if (!sawUsageNumbers) this.usageMissed = true
+      // Accumulation and the incomplete mark live in the SAME finally: on
+      // teardown (abort, consumer .return(), stream error) code after the
+      // loop never executes, so booking the numbers there would let a
+      // stream that delivered complete usage and then died claim a
+      // complete ledger with the numbers missing.
+      if (sawUsageNumbers) {
+        this.totalPromptTokens += promptTok
+        this.totalCompletionTokens += completionTok
+      } else {
+        this.usageMissed = true
+      }
     }
 
     // parse accumulated tool calls, in index order
@@ -266,9 +271,6 @@ export class LLM implements LLMClient {
       }
       parsed.push({ id: raw.id, name: raw.name, arguments: args })
     }
-
-    this.totalPromptTokens += promptTok
-    this.totalCompletionTokens += completionTok
 
     return new LLMResponse(contentParts.join(''), parsed, promptTok, completionTok)
   }
