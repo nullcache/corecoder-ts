@@ -14,7 +14,6 @@ import readline from 'node:readline/promises'
 import { parseArgs } from 'node:util'
 
 import { Agent } from './agent.js'
-import { estimateTokens } from './context.js'
 import { configFromEnv, type Config } from './config.js'
 import { LLM, LLMResponse, ScriptedLLM, type LLMClient } from './llm.js'
 import { StreamRenderer } from './render.js'
@@ -324,9 +323,11 @@ async function handleCommand(input: string, agent: Agent, config: Config): Promi
     return true
   }
   if (input === '/compact') {
-    const before = estimateTokens(agent.messages)
+    // use the calibrated measure (fixed overhead + observed ratio), not the
+    // raw char estimate, so the numbers match what compression actually sees
+    const before = agent.context.measure(agent.messages)
     const compressed = await agent.context.maybeCompress(agent.messages, agent.llm)
-    const after = estimateTokens(agent.messages)
+    const after = agent.context.measure(agent.messages)
     if (compressed) {
       console.log(green(`Compressed: ${before} → ${after} tokens (${agent.messages.length} messages)`))
     } else {
