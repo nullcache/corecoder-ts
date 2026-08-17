@@ -13,6 +13,9 @@ import { expandPath } from './paths.js'
 
 /** Compile a glob pattern to a RegExp over posix-style relative paths. */
 export function globToRegExp(pattern: string): RegExp {
+  // normalize Windows separators so `src\**\*.ts` behaves like `src/**/*.ts`
+  // (the walk produces /-joined relative paths, so a literal \ can never match)
+  pattern = pattern.replace(/\\/g, '/')
   let re = ''
   let i = 0
   while (i < pattern.length) {

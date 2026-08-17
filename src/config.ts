@@ -57,6 +57,22 @@ export interface Config {
   timeoutMs: number
 }
 
+/** Parse an integer env var; garbage (or trailing junk) falls back to the default. */
+function intFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim()
+  if (!raw || !/^\d+$/.test(raw)) return fallback
+  const n = parseInt(raw, 10)
+  return Number.isFinite(n) ? n : fallback
+}
+
+/** Parse a float env var; garbage (or trailing junk) falls back to the default. */
+function floatFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim()
+  if (!raw || !/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(raw)) return fallback
+  const n = parseFloat(raw)
+  return Number.isFinite(n) ? n : fallback
+}
+
 export function configFromEnv(): Config {
   // load .env if present (won't override existing env vars)
   loadDotenv()
@@ -68,9 +84,9 @@ export function configFromEnv(): Config {
     model: process.env.CORECODER_MODEL || 'gpt-5.5',
     apiKey,
     baseUrl: process.env.OPENAI_BASE_URL || process.env.CORECODER_BASE_URL || null,
-    maxTokens: parseInt(process.env.CORECODER_MAX_TOKENS || '4096', 10),
-    temperature: parseFloat(process.env.CORECODER_TEMPERATURE || '0'),
-    maxContextTokens: parseInt(process.env.CORECODER_MAX_CONTEXT || '128000', 10),
-    timeoutMs: parseInt(process.env.CORECODER_TIMEOUT_MS || '300000', 10),
+    maxTokens: intFromEnv('CORECODER_MAX_TOKENS' || 4096),
+    temperature: intFromEnv('CORECODER_TEMPERATURE' || 0),
+    maxContextTokens: pintFromEnv('CORECODER_MAX_CONTEXT' || 128000),
+    timeoutMs: intFromEnv('CORECODER_TIMEOUT_MS' || 300000),
   }
 }

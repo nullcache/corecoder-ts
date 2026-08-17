@@ -136,6 +136,13 @@ class TransientError extends Error {}
 
 const sleep = (ms: number, signal?: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
+    // a signal aborted *before* we got here (e.g. ^C landing between the
+    // failed request and the backoff) must reject immediately, not hang for
+    // the whole retry delay only to abort the next request anyway
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'))
+      return
+    }
     const t = setTimeout(resolve, ms)
     signal?.addEventListener('abort', () => {
       clearTimeout(t)
@@ -223,7 +230,15 @@ export class LLM implements LLMClient {
 
     for await (const data of sseEvents(res, signal)) {
       // Typed against the official SDK's wire contract (type-only import).
-      const chunk = JSON.parse(data) as ChatCompletionChunk
+      // Some "OpenAI-compatible" providers emit non-JSON data lines (heartbeats,
+      // keep-alives, stray whitespace); skip them rather than killing the whole
+      // stream on one malformed chunk.
+      let chunk: ChatCompletionChunk
+      try {
+        chunk = JSON.parse(data) as ChatCompletionChunk
+      } catch {
+        continue
+      }
 
       // usage info comes in the final chunk; some providers send usage with
       // null fields, so coerce to 0 to keep the running totals numeric
