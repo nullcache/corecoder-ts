@@ -8,6 +8,7 @@
  */
 
 import { appendFileSync, readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import readline from 'node:readline/promises'
@@ -21,7 +22,12 @@ import { StreamRenderer } from './render.js'
 import { listSessions, loadSession, saveSession } from './session.js'
 import { changedFiles } from './tools/edit.js'
 
-const VERSION = '0.1.0'
+// Single source of truth: the version in package.json, so a release bump
+// can never drift out of sync with --version / the REPL banner. createRequire
+// resolves relative to this file (dist/src/cli.js -> ../../package.json),
+// which is the same layout in a published npm tarball.
+const require = createRequire(import.meta.url)
+export const VERSION: string = require('../../package.json').version
 const HIST_PATH = path.join(os.homedir(), '.corecoder_ts_history')
 
 // ---------------------------------------------------------------- colors
@@ -156,13 +162,15 @@ export async function main(): Promise<void> {
  * owns Ctrl+C wiring: in the REPL readline's raw mode swallows ^C and emits a
  * 'SIGINT' *event*, while one-shot mode gets the real process signal — two
  * different hooks, one abort path.
- * Returns the final text, or null if interrupted/errored.
+ * Returns the final text, plus whether it was streamed and — when null —
+ * whether the turn was cancelled (^C) or failed, so the caller can pick the
+ * right process exit code: 130 for interrupt, 1 for error.
  */
 async function runTurn(
   agent: Agent,
   input: string,
   ac: AbortController,
-): Promise<{ text: string | null; streamed: boolean }> {
+): Promise<{ text: string | null; streamed: boolean; aborted: boolean }> {
   // Streamed text renders as markdown line-by-line (see render.ts). The
   // renderer holds at most one partial line, flushed before tool banners.
   const renderer = new StreamRenderer(s => process.stdout.write(s), useColor)
@@ -184,21 +192,28 @@ async function runTurn(
       step = await gen.next()
     }
     renderer.flush()
-    return { text: step.value, streamed }
+    return { text: step.value, streamed, aborted: false }
   } catch (e) {
     renderer.flush()
-    if (e instanceof Error && e.name === 'AbortError') {
+    const aborted = e instanceof Error && e.name === 'AbortError'
+    if (aborted) {
       console.log(yellow('\nInterrupted.'))
     } else {
       console.log(red(`\nError: ${e instanceof Error ? e.message : e}`))
     }
-    return { text: null, streamed }
+    return { text: null, streamed, aborted }
   }
 }
 
 /** Render a complete (non-streamed) reply as markdown. */
 function renderMarkdown(text: string): void {
   new StreamRenderer(s => process.stdout.write(s), useColor).renderAll(text)
+}
+
+/** Exit code for a finished turn: 0 success, 130 interrupt (^C), 1 error. */
+export function turnExitCode(result: { text: string | null; aborted: boolean }): number {
+  if (result.text !== null) return 0
+  return result.aborted ? 130 : 1
 }
 
 /** Non-interactive: run one prompt and exit. */
@@ -208,10 +223,10 @@ async function runOnce(agent: Agent, prompt: string): Promise<number> {
   const onSigint = () => ac.abort()
   process.once('SIGINT', onSigint)
   try {
-    const { text, streamed } = await runTurn(agent, prompt, ac)
-    if (text === null) return 130
-    if (!streamed && text) renderMarkdown(text)
-    return 0
+    const { text, streamed, aborted } = await runTurn(agent, prompt, ac)
+    const code = turnExitCode({ text, aborted })
+    if (code === 0 && !streamed && text) renderMarkdown(text)
+    return code
   } finally {
     process.removeListener('SIGINT', onSigint)
   }
