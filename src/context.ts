@@ -11,17 +11,24 @@
  * Cheapest first: layer 1 costs no model call, layer 2 keeps the recent
  * tail verbatim, layer 3 only fires near the hard limit.
  *
- * Token accounting principle: estimate before the call (a decision must be
- * made ahead of time); trust provider usage after it; degrade explicitly
- * when usage is absent — never dress unknown up as zero.
+ * Token accounting principle: the estimate below drives pre-call decisions
+ * and is a static heuristic, deliberately never calibrated; provider usage
+ * is post-hoc accounting (see /tokens) and never feeds the estimate. The
+ * two datasets never meet.
  */
 
 import type { ChatMessage, LLMClient } from './llm.js'
 import { drain } from './llm.js'
 
-/** Rough token count — ~3 chars per token for mixed en/zh content. */
+/**
+ * Rough token count via UTF-8 byte length: ~3 bytes per token. ASCII lands
+ * at ~3 chars/token and CJK (3 bytes per char) at ~1 char/token — the two
+ * rates real tokenizers roughly exhibit — and byte counting sidesteps
+ * UTF-16 surrogate pitfalls for emoji. A conservative trigger heuristic,
+ * not a claim about any model's tokenizer.
+ */
 function approxTokens(text: string): number {
-  return Math.floor(text.length / 3)
+  return Math.ceil(Buffer.byteLength(text, 'utf8') / 3)
 }
 
 export function estimateTokens(messages: ChatMessage[]): number {
@@ -42,20 +49,9 @@ export class ContextManager {
   private collapseAt: number
 
   /**
-   * Calibration factor: estimate × ratio ≈ real tokens. Starts at 1 (pure
-   * char-based estimate, the Python original's behavior) and is updated
-   * from the API's reported prompt_tokens via observe().
-   */
-  private ratio = 1
-
-  /**
    * Fixed per-request token overhead: the system prompt plus the tool
-   * schemas. The API bills for these on every call, but they're not part of
-   * `messages`, so a naive estimate can't see them. Counting them explicitly
-   * keeps `ratio` a pure *message* rate: the overhead is subtracted before
-   * the rate is derived (observe) and added back after scaling (measure),
-   * so it is never multiplied by a conversation-language multiplier and
-   * compression can't distort the calibration.
+   * schemas. The API bills for these on every call, but they're not part
+   * of `messages`, so the message estimate alone can't see them.
    */
   private fixedTokens = 0
 
@@ -72,31 +68,9 @@ export class ContextManager {
     this.fixedTokens = approxTokens(text)
   }
 
-  /**
-   * Calibrate the estimator against the real prompt_tokens the API just
-   * reported for `messages`. The char/3 guess is systematically off — CJK
-   * text runs ~1 token per char — so the *message* rate is learned here.
-   * The fixed overhead is subtracted before deriving the rate and added
-   * back after scaling in measure(): it is English/JSON with a rate of
-   * roughly 1, and folding it into the ratio would let a CJK-heavy
-   * conversation smear its multiplier onto the fixed part (overstating a
-   * compressed history by up to 2× the overhead).
-   */
-  observe(realPromptTokens: number, messages: ChatMessage[]): void {
-    // no usage from the provider → the ratio keeps its last value
-    // (initially 1 = pure char/3, the Python original's behavior)
-    if (realPromptTokens <= 0) return
-    const est = estimateTokens(messages)
-    // real ≤ fixed would make the message rate zero or negative — a tiny
-    // conversation can't calibrate anything meaningful, so skip
-    if (est > 0 && realPromptTokens > this.fixedTokens) {
-      this.ratio = (realPromptTokens - this.fixedTokens) / est
-    }
-  }
-
-  /** Best-available token count: scaled message estimate plus the fixed overhead. */
+  /** Pre-call size check: static message estimate plus the fixed overhead. */
   measure(messages: ChatMessage[]): number {
-    return Math.round(estimateTokens(messages) * this.ratio + this.fixedTokens)
+    return estimateTokens(messages) + this.fixedTokens
   }
 
 

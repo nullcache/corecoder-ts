@@ -117,6 +117,9 @@ test('aborting mid-stream rejects promptly instead of being swallowed', async ()
     const t0 = Date.now()
     await assert.rejects(turn, (e: Error) => e.name === 'AbortError')
     assert.ok(Date.now() - t0 < 2000, 'abort must not wait for more data')
+    // the torn-down stream never delivered usage — the finally must have
+    // marked the running totals incomplete (post-loop code never runs here)
+    assert.equal(llm.usageMissed, true, 'aborted stream must mark totals incomplete')
   } finally {
     globalThis.fetch = originalFetch
   }
@@ -219,6 +222,14 @@ test('usageSeen flips only when the provider actually reports usage', async () =
     const nullUsage = new LLM({ model: 'm', apiKey: 'k' })
     await drain(nullUsage.chat([{ role: 'user', content: 'hi' }]))
     assert.equal(nullUsage.usageSeen, false, 'null-field usage must not dress unknown up as 0')
+
+    // partial usage (only one number) does not count either — both or nothing
+    globalThis.fetch = (async () =>
+      sseResponse([chunk(',"usage":{"prompt_tokens":5,"completion_tokens":null}')])) as typeof fetch
+    const partialUsage = new LLM({ model: 'm', apiKey: 'k' })
+    await drain(partialUsage.chat([{ role: 'user', content: 'hi' }]))
+    assert.equal(partialUsage.usageSeen, false, 'partial usage is not complete data')
+    assert.equal(partialUsage.usageMissed, true)
 
     globalThis.fetch = (async () =>
       sseResponse([chunk(',"usage":{"prompt_tokens":5,"completion_tokens":2}')])) as typeof fetch

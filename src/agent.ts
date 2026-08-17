@@ -151,12 +151,6 @@ export class Agent {
       }
       const resp = step!.value as LLMResponse
 
-      // Calibrate the compressor's char-based estimate against the real
-      // prompt_tokens the API just billed for. Must happen before pushing
-      // the reply: `messages` still equals what the request was built from,
-      // so the real count and the estimate describe the same snapshot.
-      this.context.observe(resp.promptTokens, this.messages)
-
       this.messages.push(resp.toMessage())
 
       // no tool calls -> LLM is done, return text

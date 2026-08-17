@@ -193,52 +193,61 @@ export class LLM implements LLMClient {
     let sawUsageNumbers = false
     let completionTok = 0
 
-    for await (const data of sseEvents(res, signal, this.timeoutMs)) {
-      // Typed against the official SDK's wire contract (type-only import).
-      // Some "OpenAI-compatible" providers emit non-JSON data lines (heartbeats,
-      // keep-alives, stray whitespace); skip them rather than killing the whole
-      // stream on one malformed chunk.
-      let chunk: ChatCompletionChunk
-      try {
-        chunk = JSON.parse(data) as ChatCompletionChunk
-      } catch {
-        continue
-      }
-
-      // usage info comes in the final chunk. Only actual numbers count as
-      // "seen" — some providers send a usage object with null fields, and
-      // treating that as data would dress unknown up as 0.
-      if (chunk.usage) {
-        const pt = chunk.usage.prompt_tokens
-        const ct = chunk.usage.completion_tokens
-        if (typeof pt === 'number' || typeof ct === 'number') {
-          this.usageSeen = true
-          sawUsageNumbers = true
-          promptTok = pt ?? 0
-          completionTok = ct ?? 0
+    try {
+      for await (const data of sseEvents(res, signal, this.timeoutMs)) {
+        // Typed against the official SDK's wire contract (type-only import).
+        // Some "OpenAI-compatible" providers emit non-JSON data lines (heartbeats,
+        // keep-alives, stray whitespace); skip them rather than killing the whole
+        // stream on one malformed chunk.
+        let chunk: ChatCompletionChunk
+        try {
+          chunk = JSON.parse(data) as ChatCompletionChunk
+        } catch {
+          continue
         }
-      }
 
-      const delta = chunk.choices?.[0]?.delta
-      if (!delta) continue
-
-      if (delta.content) {
-        contentParts.push(delta.content)
-        yield delta.content
-      }
-
-      if (delta.tool_calls) {
-        for (const tcDelta of delta.tool_calls) {
-          let entry = tcMap.get(tcDelta.index)
-          if (!entry) {
-            entry = { id: '', name: '', args: '' }
-            tcMap.set(tcDelta.index, entry)
+        // usage info comes in the final chunk. Only a chunk carrying BOTH
+        // numbers counts — a usage object with null or partial fields is
+        // not data, and treating it as data would dress unknown up as 0.
+        if (chunk.usage) {
+          const pt = chunk.usage.prompt_tokens
+          const ct = chunk.usage.completion_tokens
+          if (typeof pt === 'number' && typeof ct === 'number') {
+            this.usageSeen = true
+            sawUsageNumbers = true
+            promptTok = pt
+            completionTok = ct
           }
-          if (tcDelta.id) entry.id = tcDelta.id
-          if (tcDelta.function?.name) entry.name = tcDelta.function.name
-          if (tcDelta.function?.arguments) entry.args += tcDelta.function.arguments
+        }
+
+        const delta = chunk.choices?.[0]?.delta
+        if (!delta) continue
+
+        if (delta.content) {
+          contentParts.push(delta.content)
+          yield delta.content
+        }
+
+        if (delta.tool_calls) {
+          for (const tcDelta of delta.tool_calls) {
+            let entry = tcMap.get(tcDelta.index)
+            if (!entry) {
+              entry = { id: '', name: '', args: '' }
+              tcMap.set(tcDelta.index, entry)
+            }
+            if (tcDelta.id) entry.id = tcDelta.id
+            if (tcDelta.function?.name) entry.name = tcDelta.function.name
+            if (tcDelta.function?.arguments) entry.args += tcDelta.function.arguments
+          }
         }
       }
+    } finally {
+      // Runs on normal completion AND on teardown (abort, consumer
+      // .return(), stream error): a request whose stream started but never
+      // delivered complete usage numbers permanently marks the running
+      // totals as incomplete. Placed in a finally because code after the
+      // loop simply never executes when the generator is torn down.
+      if (!sawUsageNumbers) this.usageMissed = true
     }
 
     // parse accumulated tool calls, in index order
@@ -258,7 +267,6 @@ export class LLM implements LLMClient {
       parsed.push({ id: raw.id, name: raw.name, arguments: args })
     }
 
-    if (!sawUsageNumbers) this.usageMissed = true
     this.totalPromptTokens += promptTok
     this.totalCompletionTokens += completionTok
 

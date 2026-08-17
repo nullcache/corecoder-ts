@@ -322,19 +322,17 @@ async function handleCommand(input: string, agent: Agent, config: Config): Promi
   }
   if (input === '/tokens') {
     // three states, never dressing unknown up as a number:
-    //   no usage ever      → unknown
-    //   some responses had none → reported totals, flagged incomplete
-    //   all responses had usage → reported totals
+    //   no usage ever           → unknown
+    //   some responses had none → reported prompt/completion, flagged incomplete
+    //   all responses had usage → reported prompt/completion
     if (!agent.llm.usageSeen) {
       console.log(dim('Tokens: unknown — this provider has not reported usage.'))
       return true
     }
     const p = agent.llm.totalPromptTokens
     const c = agent.llm.totalCompletionTokens
-    const note = agent.llm.usageMissed
-      ? dim(' (incomplete: some responses carried no usage)')
-      : ''
-    console.log(`Reported tokens: ${cyan(String(p))} prompt + ${cyan(String(c))} completion${note}`)
+    const note = agent.llm.usageMissed ? dim(' (incomplete)') : ''
+    console.log(`Reported tokens: ${cyan(String(p))} / ${cyan(String(c))}${note}`)
     return true
   }
   if (input === '/model' || input.startsWith('/model ')) {

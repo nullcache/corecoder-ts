@@ -1,7 +1,8 @@
 /**
- * Calibration tests: the fixed per-request overhead (system prompt + tool
- * schemas) must be counted explicitly, otherwise compression silently
- * distorts the estimate and pushes the compression thresholds too late.
+ * Static token-estimate tests: the UTF-8-byte heuristic (~3 bytes/token)
+ * and the fixed-overhead addition. Deliberately nothing about calibration —
+ * the estimate never learns from usage, so every expectation below is an
+ * exact, deterministic number.
  */
 
 import assert from 'node:assert/strict'
@@ -14,69 +15,23 @@ import { ScriptedLLM, type ChatMessage } from '../src/llm.js'
 const msg = (role: ChatMessage['role'], content: string): ChatMessage =>
   ({ role, content }) as ChatMessage
 
-test('fixed overhead is counted in observe and measure', () => {
-  const cm = new ContextManager(100_000)
-  cm.setFixedOverhead('system ' + 'x'.repeat(600)) // ~202 tokens of fixed text
-
-  const messages = [msg('user', 'hello')]
-  // naive estimate: 5 chars / 3 ≈ 1 token; with overhead ≈ 203
-  cm.observe(203, messages)
-
-  assert.equal(cm.measure(messages), 203)
+test('the estimate is UTF-8 bytes over three — exact values, all scripts', () => {
+  assert.equal(estimateTokens([msg('user', 'abc')]), 1) // 3 bytes
+  assert.equal(estimateTokens([msg('user', 'abcd')]), 2) // ceil(4/3)
+  assert.equal(estimateTokens([msg('user', '汉'.repeat(10))]), 10) // 30 bytes → ~1 token/char
+  assert.equal(estimateTokens([msg('user', 'hi 汉字')]), 3) // 3 + 6 bytes
+  assert.equal(estimateTokens([msg('user', '😀')]), 2) // 4 UTF-8 bytes, no UTF-16 pitfalls
 })
 
-test('measure stays honest after the conversation shrinks', () => {
+test('measure adds the fixed overhead to the message estimate', () => {
   const cm = new ContextManager(100_000)
-  cm.setFixedOverhead('system ' + 'x'.repeat(600)) // ~202 tokens fixed
-
-  // a long conversation: 20 messages × ~153 chars each ≈ 1000 estimate tokens
-  const big: ChatMessage[] = Array.from({ length: 20 }, (_, i) =>
-    msg('user', 'q' + i + ' ' + 'y'.repeat(150)),
-  )
-  const estBig = estimateTokens(big)
-  assert.ok(estBig > 950 && estBig < 1100, 'sanity: big estimate ~1000, got ' + estBig)
-
-  // the API bills ~1000 + 202 overhead; calibrate against that
-  const realBig = estBig + 202
-  cm.observe(realBig, big)
-
-  // now the conversation got compressed to a tiny summary
-  const small = [msg('user', '[Context compressed]\nshort summary here')]
-
-  // with fixed overhead counted: estimate = ~10 + 202 = 212, measure ≈ 212
-  // without it: ratio ≈ (1000+202)/1000 ≈ 1.2 applied to ~10 → ~12, a ~95% underestimate
-  const measured = cm.measure(small)
-  assert.ok(
-    measured >= 190 && measured <= 230,
-    'measure should reflect the fixed overhead, got ' + measured + ' (naive would be ~12)',
-  )
-})
-
-test('without fixed overhead the estimator behaves as before', () => {
-  const cm = new ContextManager(100_000)
-  const messages = [msg('user', 'a'.repeat(300))] // ~100 estimate tokens
-  cm.observe(150, messages) // real is 1.5× the estimate
-  assert.equal(cm.measure(messages), 150)
+  cm.setFixedOverhead('x'.repeat(600)) // 600 bytes → 200 tokens
+  assert.equal(cm.measure([]), 200) // an empty history still costs the overhead
+  assert.equal(cm.measure([msg('user', '汉'.repeat(66))]), 266) // 66 + 200
 })
 
 test('agent registers system prompt and tool schemas as fixed overhead', () => {
   const agent = new Agent({ llm: new ScriptedLLM([]) })
   // empty history still measures the fixed overhead, not zero
-  const measured = agent.context.measure(agent.messages)
-  assert.ok(measured > 0, 'empty history should measure the fixed overhead, got ' + measured)
-})
-
-test('a CJK-rate conversation does not inflate the English fixed overhead', () => {
-  const cm = new ContextManager(100_000)
-  cm.setFixedOverhead('x'.repeat(600)) // F_est = 200, English-ish (true rate ≈ 1)
-  const big = [msg('user', '汉'.repeat(3000))] // est = 1000, true CJK rate ≈ 3
-  cm.observe(200 + 3000, big) // real = fixed(200) + messages(3000)
-
-  // after compression the history is tiny; the fixed part must NOT be
-  // scaled by the CJK multiplier
-  const small = [msg('user', '汉'.repeat(66))] // est = 22, true ≈ 66
-  const measured = cm.measure(small) // expected ≈ 66×? … 22×3 + 200 = 266
-  assert.ok(measured >= 240 && measured <= 300, `expected ≈266, got ${measured}`)
-  // the old blended formula gave (22+200) × (3200/1200) ≈ 592
-  assert.ok(measured < 400, `fixed overhead was inflated by the CJK rate: ${measured}`)
+  assert.ok(agent.context.measure(agent.messages) > 0)
 })
