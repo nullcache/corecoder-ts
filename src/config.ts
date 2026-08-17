@@ -84,9 +84,9 @@ export function configFromEnv(): Config {
     model: process.env.CORECODER_MODEL || 'gpt-5.5',
     apiKey,
     baseUrl: process.env.OPENAI_BASE_URL || process.env.CORECODER_BASE_URL || null,
-    maxTokens: intFromEnv('CORECODER_MAX_TOKENS' || 4096),
-    temperature: intFromEnv('CORECODER_TEMPERATURE' || 0),
-    maxContextTokens: pintFromEnv('CORECODER_MAX_CONTEXT' || 128000),
-    timeoutMs: intFromEnv('CORECODER_TIMEOUT_MS' || 300000),
+    maxTokens: intFromEnv('CORECODER_MAX_TOKENS', 4096),
+    temperature: floatFromEnv('CORECODER_TEMPERATURE', 0),
+    maxContextTokens: intFromEnv('CORECODER_MAX_CONTEXT', 128000),
+    timeoutMs: intFromEnv('CORECODER_TIMEOUT_MS', 300000),
   }
 }
