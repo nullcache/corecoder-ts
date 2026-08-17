@@ -16,6 +16,9 @@ export function globToRegExp(pattern: string): RegExp {
   // normalize Windows separators so `src\**\*.ts` behaves like `src/**/*.ts`
   // (the walk produces /-joined relative paths, so a literal \ can never match)
   pattern = pattern.replace(/\\/g, '/')
+  // the walked relative paths never start with './', but models write
+  // './src/*.ts' constantly — strip it or the pattern silently matches nothing
+  while (pattern.startsWith('./')) pattern = pattern.slice(2)
   let re = ''
   let i = 0
   while (i < pattern.length) {
@@ -37,6 +40,37 @@ export function globToRegExp(pattern: string): RegExp {
     } else if (ch === '?') {
       re += '[^/]'
       i += 1
+    } else if (ch === '[') {
+      // Character class with Python-fnmatch semantics: `[abc]`, `[!abc]`
+      // negation, `a-z` ranges. Faithfully: `^` is a literal member (only
+      // `!` negates), a `]` right after `[` or `[!` is a literal member,
+      // and an invalid range like `[z-a]` matches nothing instead of
+      // blowing up the whole pattern. Not a full glob dialect — no braces,
+      // no extglob — and that's deliberate.
+      let j = i + 1
+      let negate = false
+      if (pattern[j] === '!') {
+        negate = true
+        j++
+      }
+      // scan for the closing ']', skipping one that is the first member
+      const scanFrom = pattern[j] === ']' ? j + 1 : j
+      const end = pattern.indexOf(']', scanFrom)
+      if (end !== -1) {
+        // escape everything regex-special inside a class except '-' (ranges)
+        const body = pattern.slice(j, end).replace(/[\\\]^]/g, '\\$&')
+        const cls = '[' + (negate ? '^' : '') + body + ']'
+        try {
+          new RegExp(cls)
+          re += cls
+        } catch {
+          re += '(?!)' // invalid range: fnmatch matches nothing, so do we
+        }
+        i = end + 1
+      } else {
+        re += '\\[' // unclosed bracket: treat as a literal
+        i += 1
+      }
     } else {
       re += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&')
       i += 1

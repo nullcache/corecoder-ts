@@ -10,6 +10,10 @@
  *
  * Cheapest first: layer 1 costs no model call, layer 2 keeps the recent
  * tail verbatim, layer 3 only fires near the hard limit.
+ *
+ * Token accounting principle: estimate before the call (a decision must be
+ * made ahead of time); trust provider usage after it; degrade explicitly
+ * when usage is absent — never dress unknown up as zero.
  */
 
 import type { ChatMessage, LLMClient } from './llm.js'
@@ -79,6 +83,8 @@ export class ContextManager {
    * the ratio means.
    */
   observe(realPromptTokens: number, messages: ChatMessage[]): void {
+    // no usage from the provider → the ratio keeps its last value
+    // (initially 1 = pure char/3, the Python original's behavior)
     if (realPromptTokens <= 0) return
     const est = estimateTokens(messages) + this.fixedTokens
     if (est > 0) this.ratio = realPromptTokens / est
@@ -91,7 +97,11 @@ export class ContextManager {
 
 
   /** Apply compression layers as needed (mutates `messages` in place). */
-  async maybeCompress(messages: ChatMessage[], llm?: LLMClient): Promise<boolean> {
+  async maybeCompress(
+    messages: ChatMessage[],
+    llm?: LLMClient,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
     let current = this.measure(messages)
     let compressed = false
 
@@ -105,7 +115,7 @@ export class ContextManager {
 
     // Layer 2: LLM-powered summarization of old turns
     if (current > this.summarizeAt && messages.length > 10) {
-      if (await this.summarizeOld(messages, llm, 8)) {
+      if (await this.summarizeOld(messages, llm, 8, signal)) {
         compressed = true
         current = this.measure(messages)
       }
@@ -113,12 +123,13 @@ export class ContextManager {
 
     // Layer 3: hard collapse — last resort
     if (current > this.collapseAt && messages.length > 4) {
-      await this.hardCollapse(messages, llm)
+      await this.hardCollapse(messages, llm, signal)
       compressed = true
     }
 
     return compressed
   }
+
 
   /**
    * Layer 1: truncate tool results over 1500 chars to their first/last lines.
@@ -160,6 +171,7 @@ export class ContextManager {
     messages: ChatMessage[],
     llm: LLMClient | undefined,
     keepRecent = 8,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     if (messages.length <= keepRecent) return false
 
@@ -167,7 +179,7 @@ export class ContextManager {
     const old = messages.slice(0, split)
     const tail = messages.slice(split)
 
-    const summary = await this.getSummary(old, llm)
+    const summary = await this.getSummary(old, llm, signal)
 
     messages.length = 0
     messages.push({
@@ -183,10 +195,14 @@ export class ContextManager {
   }
 
   /** Layer 3: emergency compression. Keep only last 4 messages + summary. */
-  private async hardCollapse(messages: ChatMessage[], llm?: LLMClient): Promise<void> {
+  private async hardCollapse(
+    messages: ChatMessage[],
+    llm?: LLMClient,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const split = this.safeSplit(messages, messages.length > 4 ? 4 : 2)
     const tail = messages.slice(split)
-    const summary = await this.getSummary(messages.slice(0, split), llm)
+    const summary = await this.getSummary(messages.slice(0, split), llm, signal)
 
     messages.length = 0
     messages.push({ role: 'user', content: `[Hard context reset]\n${summary}` })
@@ -198,11 +214,17 @@ export class ContextManager {
   }
 
   /** Generate a summary via the LLM, falling back to plain extraction. */
-  private async getSummary(messages: ChatMessage[], llm?: LLMClient): Promise<string> {
+  private async getSummary(
+    messages: ChatMessage[],
+    llm?: LLMClient,
+    signal?: AbortSignal,
+  ): Promise<string> {
     const flat = this.flatten(messages)
 
     if (llm) {
       try {
+        // the signal makes the summarization call — and its retry backoffs —
+        // cancellable; without it a ^C is dead for the whole compression
         const resp = await drain(
           llm.chat([
             {
@@ -215,11 +237,13 @@ export class ContextManager {
                 'redundant back-and-forth.',
             },
             { role: 'user', content: flat.slice(0, 15_000) },
-          ]),
+          ], undefined, signal),
         )
         return resp.content
-      } catch {
-        // fall through to extraction
+      } catch (e) {
+        // cancellation is control flow, not a summarization failure
+        if (e instanceof Error && e.name === 'AbortError') throw e
+        // anything else: fall through to extraction
       }
     }
 

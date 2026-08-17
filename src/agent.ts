@@ -23,10 +23,10 @@
  */
 
 import { ContextManager } from './context.js'
-import type { ChatMessage, LLMClient, ToolCallReq, ToolSchema } from './llm.js'
+import type { ChatMessage, LLMClient, LLMResponse, ToolCallReq, ToolSchema } from './llm.js'
 import { missingArgs, toSchema, type Tool } from './tools/base.js'
 import { SubAgentTool } from './tools/agent.js'
-import { ALL_TOOLS } from './tools/index.js'
+import { makeAllTools } from './tools/index.js'
 import { systemPrompt } from './prompt.js'
 
 export type AgentEvent =
@@ -53,7 +53,8 @@ export class Agent {
 
   constructor(opts: AgentOptions) {
     this.llm = opts.llm
-    this.tools = opts.tools ?? ALL_TOOLS
+    // fresh instances by default — see makeAllTools() on why sharing breaks
+    this.tools = opts.tools ?? makeAllTools()
     this.toolByName = new Map(this.tools.map(t => [t.name, t]))
     this.context = new ContextManager(opts.maxContextTokens ?? 128_000)
     this.maxRounds = opts.maxRounds ?? 50
@@ -84,7 +85,7 @@ export class Agent {
    */
   async *chat(userInput: string, signal?: AbortSignal): AsyncGenerator<AgentEvent, string> {
     this.messages.push({ role: 'user', content: userInput })
-    await this.context.maybeCompress(this.messages, this.llm)
+    await this.context.maybeCompress(this.messages, this.llm, signal)
 
     try {
       // yield* forwards every event and evaluates to rounds()'s return value
@@ -98,7 +99,29 @@ export class Agent {
         this.messages.push({ role: 'assistant', content: '[interrupted by user]' })
       }
       throw e
+    } finally {
+      // A consumer can abandon the generator between yields (for-await break,
+      // .return(), an exception in its own loop body). None of those unwind
+      // through the catch above, but this finally still runs — backfill any
+      // tool_calls the abandoned turn left unanswered, or the history is
+      // permanently rejected by the API. No-op on a normal return.
+      this.answerAbandonedToolCalls()
     }
+  }
+
+  /** Backfill replies for a trailing assistant tool_calls message (see chat's finally). */
+  private answerAbandonedToolCalls(): void {
+    // skip tool replies already recorded after the assistant message — the
+    // consumer may have abandoned the turn after some, but not all, replies
+    let i = this.messages.length - 1
+    while (i >= 0 && this.messages[i]!.role === 'tool') i--
+    const m = i >= 0 ? this.messages[i] : undefined
+    if (!m || m.role !== 'assistant' || !m.tool_calls?.length) return
+    // answerPendingToolCalls skips ids that already have replies, so this is
+    // a no-op for completed turns and fills exactly the gaps otherwise
+    this.answerPendingToolCalls(
+      m.tool_calls.map(tc => ({ id: tc.id, name: tc.function.name, arguments: {} })),
+    )
   }
 
   /** The LLM/tool loop behind chat(); split out so chat() can wrap it in one try. */
@@ -109,12 +132,24 @@ export class Agent {
       // strings while we yield typed events — the .done/.value dance below
       // is exactly what yield* does under the hood.
       const stream = this.llm.chat(this.fullMessages(), this.toolSchemas(), signal)
-      let step = await stream.next()
-      while (!step.done) {
-        yield { type: 'text', delta: step.value }
+      let step: IteratorResult<string, LLMResponse> | undefined
+      try {
         step = await stream.next()
+        while (!step.done) {
+          yield { type: 'text', delta: step.value }
+          step = await stream.next()
+        }
+      } finally {
+        // The consumer can abandon us at the text yield above, and hand-driven
+        // .next() gets none of yield*'s auto-close propagation — close the
+        // inner generator so its own finally runs (the SSE reader is cancelled
+        // and the connection released). Awaited: for-await's break waits on
+        // our return(), so teardown must complete inside it — fire-and-forget
+        // would leak the cleanup past the break (and turn a throwing inner
+        // finally into an unhandled rejection). No-op after normal completion.
+        if (!step?.done) await stream.return(undefined as unknown as LLMResponse)
       }
-      const resp = step.value
+      const resp = step!.value as LLMResponse
 
       // Calibrate the compressor's char-based estimate against the real
       // prompt_tokens the API just billed for. Must happen before pushing
@@ -159,7 +194,7 @@ export class Agent {
       }
 
       // compress if tool outputs are big
-      await this.context.maybeCompress(this.messages, this.llm)
+      await this.context.maybeCompress(this.messages, this.llm, signal)
     }
 
     return '(reached maximum tool-call rounds)'

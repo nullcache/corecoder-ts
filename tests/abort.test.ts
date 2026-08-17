@@ -54,6 +54,7 @@ test('abort propagates through the sub-agent tool to the sub-agent\'s LLM call',
   const llm: LLMClient = {
     model: 'slow',
     totalPromptTokens: 0,
+    usageSeen: true,
     totalCompletionTokens: 0,
     estimatedCost: null,
     async *chat(_messages, _tools, signal) {

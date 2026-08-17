@@ -100,10 +100,14 @@ function killProcessTree(child: ChildProcess): void {
     spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
     return
   }
+  // SIGKILL, not SIGTERM: a request can be ignored (`trap '' TERM`) and a
+  // wedged child would hang the turn forever. Python's subprocess.run does
+  // the same on timeout — kill() outright — except it only reaches the
+  // direct child; killing the group is that behavior, hardened.
   try {
-    process.kill(-child.pid, 'SIGTERM')
+    process.kill(-child.pid, 'SIGKILL')
   } catch {
-    child.kill() // process group already gone — nothing left to kill
+    child.kill('SIGKILL') // process group already gone — best effort
   }
 }
 

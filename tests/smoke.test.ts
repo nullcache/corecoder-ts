@@ -106,6 +106,7 @@ test('abort mid-stream marks the turn [interrupted by user]', async () => {
   const llm: LLMClient = {
     model: 'aborts-mid-stream',
     totalPromptTokens: 0,
+    usageSeen: true,
     totalCompletionTokens: 0,
     estimatedCost: null,
     // eslint-disable-next-line require-yield

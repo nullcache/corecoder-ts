@@ -1,7 +1,7 @@
 # corecoder-ts
 
 A TypeScript port of [CoreCoder](https://github.com/he-yufeng/CoreCoder) — a minimal AI coding agent
-that runs in your terminal. Roughly 2,600 lines of source (plus ~850 lines of tests), zero runtime
+that runs in your terminal. Roughly 2,800 lines of source (plus ~1,050 lines of tests), zero runtime
 dependencies, and the whole thing is
 meant to be read: each module is a distilled version of the same idea from Claude Code, with the
 commentary on *why* it's shaped that way.

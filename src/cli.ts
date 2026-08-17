@@ -7,7 +7,8 @@
  * and a few raw ANSI escapes for color. Zero runtime dependencies.
  */
 
-import { appendFileSync, readFileSync } from 'node:fs'
+import { appendFileSync, readFileSync, realpathSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
@@ -320,6 +321,12 @@ async function handleCommand(input: string, agent: Agent, config: Config): Promi
     return true
   }
   if (input === '/tokens') {
+    // never dress unknown up as zero: some providers (or the stream_options
+    // fallback) report no usage at all — say so instead of printing 0
+    if (!agent.llm.usageSeen) {
+      console.log(dim('Tokens: unknown — this provider has not reported usage.'))
+      return true
+    }
     const p = agent.llm.totalPromptTokens
     const c = agent.llm.totalCompletionTokens
     let line = `Tokens: ${cyan(String(p))} prompt + ${cyan(String(c))} completion = ${bold(String(p + c))} total`
@@ -434,8 +441,20 @@ async function runDemo(): Promise<number> {
   return code
 }
 
-// __main__ equivalent: run only when executed directly, not when imported
-const isDirectRun = process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href
+// __main__ equivalent: run only when executed directly, not when imported.
+// argv[1] must be realpath'd: npm bin installs invoke the CLI through a
+// symlink, while import.meta.url is the resolved target — a raw string
+// compare would fail and the installed command would silently do nothing.
+let isDirectRun = false
+if (process.argv[1]) {
+  try {
+    isDirectRun = import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
+  } catch {
+    // realpath can fail in exotic embeddings — fall back to the plain compare
+    // rather than silently refusing to start
+    isDirectRun = import.meta.url === pathToFileURL(process.argv[1]).href
+  }
+}
 if (isDirectRun) {
   main().catch(e => {
     console.error(e)

@@ -107,6 +107,8 @@ export interface LLMClient {
   model: string
   totalPromptTokens: number
   totalCompletionTokens: number
+  /** True once any response has carried usage data — /tokens shows 'unknown' until then. */
+  usageSeen: boolean
   readonly estimatedCost: number | null
   chat(
     messages: ChatMessage[],
@@ -156,6 +158,7 @@ export class LLM implements LLMClient {
   model: string
   totalPromptTokens = 0
   totalCompletionTokens = 0
+  usageSeen = false
 
   private apiKey: string
   private baseUrl: string
@@ -228,7 +231,7 @@ export class LLM implements LLMClient {
     let promptTok = 0
     let completionTok = 0
 
-    for await (const data of sseEvents(res, signal)) {
+    for await (const data of sseEvents(res, signal, this.timeoutMs)) {
       // Typed against the official SDK's wire contract (type-only import).
       // Some "OpenAI-compatible" providers emit non-JSON data lines (heartbeats,
       // keep-alives, stray whitespace); skip them rather than killing the whole
@@ -243,6 +246,7 @@ export class LLM implements LLMClient {
       // usage info comes in the final chunk; some providers send usage with
       // null fields, so coerce to 0 to keep the running totals numeric
       if (chunk.usage) {
+        this.usageSeen = true
         promptTok = chunk.usage.prompt_tokens ?? 0
         completionTok = chunk.usage.completion_tokens ?? 0
       }
@@ -275,7 +279,11 @@ export class LLM implements LLMClient {
       const raw = tcMap.get(idx)!
       let args: Record<string, unknown>
       try {
-        args = JSON.parse(raw.args) as Record<string, unknown>
+        // "null", "3" and "[1]" are valid JSON but not argument objects; some
+        // OpenAI-compat servers send arguments:"null" for no-arg calls, and a
+        // null here would crash every downstream `key in args` access
+        const v = JSON.parse(raw.args) as unknown
+        args = v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {}
       } catch {
         args = {}
       }
@@ -369,20 +377,51 @@ export class LLM implements LLMClient {
 }
 
 /**
- * Parse a Server-Sent-Events response body into `data:` payload strings,
- * stopping at [DONE]. Handles payloads split across network chunks by
- * buffering the trailing partial line.
+ * Parse a Server-Sent-Events body into `data:` payloads, stopping at
+ * [DONE] and buffering partial lines across network chunks.
+ *
+ * The body phase owns its own cancellation and stalls — callOnce's timeout
+ * only guards until the headers arrive. An abort cancels the reader
+ * (unblocking a pending read and closing the connection); each read races
+ * an idle timer. This mirrors httpx's read-timeout semantics, which the
+ * Python original inherited from its SDK for free.
  */
-async function* sseEvents(res: Response, signal?: AbortSignal): AsyncGenerator<string> {
+async function* sseEvents(
+  res: Response,
+  signal?: AbortSignal,
+  idleTimeoutMs = 300_000,
+): AsyncGenerator<string> {
   if (!res.body) throw new Error('response has no body')
   const reader = res.body.getReader()
+  const onAbort = () => {
+    void reader.cancel().catch(() => {})
+  }
+  if (signal?.aborted) {
+    await reader.cancel().catch(() => {})
+    throw new DOMException('Aborted', 'AbortError')
+  }
+  signal?.addEventListener('abort', onAbort, { once: true })
   const decoder = new TextDecoder()
   let buffer = ''
 
   try {
     while (true) {
+      let idleTimer: NodeJS.Timeout | undefined
+      const idle = new Promise<never>((_, reject) => {
+        idleTimer = setTimeout(
+          () => reject(new TransientError(`stream stalled: no data for ${idleTimeoutMs}ms`)),
+          idleTimeoutMs,
+        )
+      })
+      let step: Awaited<ReturnType<typeof reader.read>>
+      try {
+        step = await Promise.race([reader.read(), idle])
+      } finally {
+        clearTimeout(idleTimer)
+      }
+      // a cancelled reader resolves read() with done — surface the abort
       if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
-      const { done, value } = await reader.read()
+      const { done, value } = step
       if (done) break
       buffer += decoder.decode(value, { stream: true })
 
@@ -398,7 +437,11 @@ async function* sseEvents(res: Response, signal?: AbortSignal): AsyncGenerator<s
       }
     }
   } finally {
-    reader.releaseLock()
+    signal?.removeEventListener('abort', onAbort)
+    // close the connection on every exit path (early return, error, abort).
+    // Awaited so a consumer tearing down the generator chain observes the
+    // connection as closed by the time its return() resolves.
+    await reader.cancel().catch(() => {})
   }
 }
 
@@ -414,6 +457,8 @@ async function* sseEvents(res: Response, signal?: AbortSignal): AsyncGenerator<s
 export class ScriptedLLM implements LLMClient {
   totalPromptTokens = 0
   totalCompletionTokens = 0
+  // deterministic playback: its word-count bookkeeping is always "known"
+  usageSeen = true
 
   private turns: LLMResponse[]
 
