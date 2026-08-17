@@ -44,6 +44,19 @@ export class ContextManager {
    */
   private ratio = 1
 
+  /**
+   * Fixed per-request token overhead: the system prompt plus the tool
+   * schemas. The API bills for these on every call, but they're not part of
+   * `messages`, so a naive estimate can't see them. Counting them explicitly
+   * keeps `ratio` a pure chars-per-token rate. Without this, compression
+   * would silently distort the calibration: after layer 2/3 shrink the
+   * message list, the fixed overhead makes up a larger share of the real
+   * usage, the ratio (calibrated on an unshrunk conversation) overcounts it,
+   * and `measure()` underestimates — pushing the compression thresholds
+   * later than intended, close to or past the provider's real limit.
+   */
+  private fixedTokens = 0
+
   constructor(maxTokens = 128_000) {
     this.maxTokens = maxTokens
     // layer thresholds (fraction of maxTokens)
@@ -52,24 +65,30 @@ export class ContextManager {
     this.collapseAt = Math.floor(maxTokens * 0.9) // 90% -> hard collapse
   }
 
+  /** Register the fixed per-request text (system prompt + tool schemas). */
+  setFixedOverhead(text: string): void {
+    this.fixedTokens = approxTokens(text)
+  }
+
   /**
    * Calibrate the estimator against the real prompt_tokens the API just
    * reported for `messages`. The char/3 guess is systematically off — CJK
-   * text runs ~1 token per char, and the estimate can't see the fixed
-   * system-prompt + tool-schema overhead the API bills for. Scaling by
-   * real/estimated absorbs both. Survives compression: the ratio is a
-   * chars-to-tokens rate, still valid after messages shrink.
+   * text runs ~1 token per char. The fixed overhead is counted explicitly
+   * (see setFixedOverhead), so the ratio stays a pure chars-per-token rate
+   * and survives compression: shrinking the messages doesn't change what
+   * the ratio means.
    */
   observe(realPromptTokens: number, messages: ChatMessage[]): void {
     if (realPromptTokens <= 0) return
-    const est = estimateTokens(messages)
+    const est = estimateTokens(messages) + this.fixedTokens
     if (est > 0) this.ratio = realPromptTokens / est
   }
 
   /** Best-available token count: char estimate scaled by observed reality. */
   measure(messages: ChatMessage[]): number {
-    return Math.round(estimateTokens(messages) * this.ratio)
+    return Math.round((estimateTokens(messages) + this.fixedTokens) * this.ratio)
   }
+
 
   /** Apply compression layers as needed (mutates `messages` in place). */
   async maybeCompress(messages: ChatMessage[], llm?: LLMClient): Promise<boolean> {
