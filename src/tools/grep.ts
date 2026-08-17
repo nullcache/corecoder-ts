@@ -88,7 +88,11 @@ export const grepTool: Tool = {
       for (const line of text.split('\n')) {
         lineno++
         if (regex.test(line)) {
-          matches.push(`${fp}:${lineno}: ${line.trimEnd()}`)
+          // cap match line width (same 2000-char limit as read_file): a single
+          // minified line would otherwise flood the context with one mega-match
+          const capped =
+            line.length > 2000 ? line.slice(0, 2000) + '… (line truncated)' : line
+          matches.push(`${fp}:${lineno}: ${capped.trimEnd()}`)
           if (matches.length >= MAX_MATCHES) {
             matches.push(`... (${MAX_MATCHES} match limit reached)`)
             return matches.join('\n')
