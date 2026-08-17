@@ -90,6 +90,47 @@ test('abort propagates through the sub-agent tool to the sub-agent\'s LLM call',
   assert.equal(toolMsg!.content, '[interrupted]')
 })
 
+test('abort during context compression marks the user turn interrupted', async () => {
+  let compressionStarted!: () => void
+  const started = new Promise<void>(resolve => {
+    compressionStarted = resolve
+  })
+  const llm: LLMClient = {
+    model: 'slow-summarizer',
+    totalPromptTokens: 0,
+    totalCompletionTokens: 0,
+    usageSeen: true,
+    async *chat(_messages, _tools, signal) {
+      compressionStarted()
+      await new Promise<void>((_, reject) => {
+        if (signal?.aborted) {
+          reject(new DOMException('Aborted', 'AbortError'))
+          return
+        }
+        signal?.addEventListener(
+          'abort',
+          () => reject(new DOMException('Aborted', 'AbortError')),
+          { once: true },
+        )
+      })
+      return new LLMResponse('unreachable')
+    },
+  }
+  const agent = new Agent({ llm, maxContextTokens: 10 })
+  for (let i = 0; i < 12; i++) {
+    agent.messages.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: 'old context' })
+  }
+  const ac = new AbortController()
+
+  const turn = drain(agent.chat('cancel during compression', ac.signal))
+  await started
+  ac.abort()
+
+  await assert.rejects(turn, isAbort)
+  assert.equal(agent.messages.at(-1)?.role, 'assistant')
+  assert.equal(agent.messages.at(-1)?.content, '[interrupted by user]')
+})
+
 test('pre-aborted signals make glob and grep reject immediately', async () => {
   const ac = new AbortController()
   ac.abort()
