@@ -67,7 +67,7 @@ Minimal AI coding agent. Works with any OpenAI-compatible LLM.
 Options:
   -m, --model <name>   Model name (default: $CORECODER_MODEL or gpt-5.5)
   --base-url <url>     API base URL (default: $OPENAI_BASE_URL)
-  --api-key <key>      API key (default: $OPENAI_API_KEY)
+  --api-key <key>      API key (default: $CORECODER_API_KEY, $OPENAI_API_KEY, or $DEEPSEEK_API_KEY)
   -p, --prompt <text>  One-shot prompt (non-interactive mode)
   --demo               Run the offline scripted demo (no API key needed)
   -r, --resume <id>    Resume a saved session
