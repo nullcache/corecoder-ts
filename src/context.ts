@@ -52,12 +52,10 @@ export class ContextManager {
    * Fixed per-request token overhead: the system prompt plus the tool
    * schemas. The API bills for these on every call, but they're not part of
    * `messages`, so a naive estimate can't see them. Counting them explicitly
-   * keeps `ratio` a pure chars-per-token rate. Without this, compression
-   * would silently distort the calibration: after layer 2/3 shrink the
-   * message list, the fixed overhead makes up a larger share of the real
-   * usage, the ratio (calibrated on an unshrunk conversation) overcounts it,
-   * and `measure()` underestimates — pushing the compression thresholds
-   * later than intended, close to or past the provider's real limit.
+   * keeps `ratio` a pure *message* rate: the overhead is subtracted before
+   * the rate is derived (observe) and added back after scaling (measure),
+   * so it is never multiplied by a conversation-language multiplier and
+   * compression can't distort the calibration.
    */
   private fixedTokens = 0
 
@@ -77,22 +75,28 @@ export class ContextManager {
   /**
    * Calibrate the estimator against the real prompt_tokens the API just
    * reported for `messages`. The char/3 guess is systematically off — CJK
-   * text runs ~1 token per char. The fixed overhead is counted explicitly
-   * (see setFixedOverhead), so the ratio stays a pure chars-per-token rate
-   * and survives compression: shrinking the messages doesn't change what
-   * the ratio means.
+   * text runs ~1 token per char — so the *message* rate is learned here.
+   * The fixed overhead is subtracted before deriving the rate and added
+   * back after scaling in measure(): it is English/JSON with a rate of
+   * roughly 1, and folding it into the ratio would let a CJK-heavy
+   * conversation smear its multiplier onto the fixed part (overstating a
+   * compressed history by up to 2× the overhead).
    */
   observe(realPromptTokens: number, messages: ChatMessage[]): void {
     // no usage from the provider → the ratio keeps its last value
     // (initially 1 = pure char/3, the Python original's behavior)
     if (realPromptTokens <= 0) return
-    const est = estimateTokens(messages) + this.fixedTokens
-    if (est > 0) this.ratio = realPromptTokens / est
+    const est = estimateTokens(messages)
+    // real ≤ fixed would make the message rate zero or negative — a tiny
+    // conversation can't calibrate anything meaningful, so skip
+    if (est > 0 && realPromptTokens > this.fixedTokens) {
+      this.ratio = (realPromptTokens - this.fixedTokens) / est
+    }
   }
 
-  /** Best-available token count: char estimate scaled by observed reality. */
+  /** Best-available token count: scaled message estimate plus the fixed overhead. */
   measure(messages: ChatMessage[]): number {
-    return Math.round((estimateTokens(messages) + this.fixedTokens) * this.ratio)
+    return Math.round(estimateTokens(messages) * this.ratio + this.fixedTokens)
   }
 
 

@@ -10,10 +10,11 @@ import { readFileTool } from './read.js'
 import { writeFileTool } from './write.js'
 
 /**
- * Fresh default toolset. A factory, not a constant: SubAgentTool carries a
- * per-Agent `parentAgent` reference, so a shared instance would be silently
- * re-pointed by every Agent constructed — the first agent's sub-agents would
- * run with the second agent's LLM client and context.
+ * Fresh default toolset. A factory on purpose — and the only export:
+ * SubAgentTool carries a per-Agent `parentAgent` reference, so any shared
+ * instance list (the old ALL_TOOLS) would be silently re-pointed by every
+ * Agent constructed, sending the first agent's sub-agents off with the
+ * second agent's LLM client and context.
  */
 export function makeAllTools(): Tool[] {
   return [
@@ -25,12 +26,4 @@ export function makeAllTools(): Tool[] {
     grepTool,
     new SubAgentTool(),
   ]
-}
-
-/** A shared instance list, kept for lookups and schema listings. */
-export const ALL_TOOLS: Tool[] = makeAllTools()
-
-/** Look up a tool by name. */
-export function getTool(name: string): Tool | null {
-  return ALL_TOOLS.find(t => t.name === name) ?? null
 }

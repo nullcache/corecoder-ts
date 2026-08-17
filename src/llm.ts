@@ -78,6 +78,8 @@ export interface LLMClient {
   totalCompletionTokens: number
   /** True once any response has carried usage data — /tokens shows 'unknown' until then. */
   usageSeen: boolean
+  /** True once any response finished WITHOUT usage numbers — the totals are then incomplete. */
+  usageMissed?: boolean
   chat(
     messages: ChatMessage[],
     tools?: ToolSchema[],
@@ -127,6 +129,7 @@ export class LLM implements LLMClient {
   totalPromptTokens = 0
   totalCompletionTokens = 0
   usageSeen = false
+  usageMissed = false
 
   private apiKey: string
   private baseUrl: string
@@ -187,6 +190,7 @@ export class LLM implements LLMClient {
     // be reassembled per index before parsing.
     const tcMap = new Map<number, { id: string; name: string; args: string }>()
     let promptTok = 0
+    let sawUsageNumbers = false
     let completionTok = 0
 
     for await (const data of sseEvents(res, signal, this.timeoutMs)) {
@@ -201,12 +205,18 @@ export class LLM implements LLMClient {
         continue
       }
 
-      // usage info comes in the final chunk; some providers send usage with
-      // null fields, so coerce to 0 to keep the running totals numeric
+      // usage info comes in the final chunk. Only actual numbers count as
+      // "seen" — some providers send a usage object with null fields, and
+      // treating that as data would dress unknown up as 0.
       if (chunk.usage) {
-        this.usageSeen = true
-        promptTok = chunk.usage.prompt_tokens ?? 0
-        completionTok = chunk.usage.completion_tokens ?? 0
+        const pt = chunk.usage.prompt_tokens
+        const ct = chunk.usage.completion_tokens
+        if (typeof pt === 'number' || typeof ct === 'number') {
+          this.usageSeen = true
+          sawUsageNumbers = true
+          promptTok = pt ?? 0
+          completionTok = ct ?? 0
+        }
       }
 
       const delta = chunk.choices?.[0]?.delta
@@ -248,6 +258,7 @@ export class LLM implements LLMClient {
       parsed.push({ id: raw.id, name: raw.name, arguments: args })
     }
 
+    if (!sawUsageNumbers) this.usageMissed = true
     this.totalPromptTokens += promptTok
     this.totalCompletionTokens += completionTok
 

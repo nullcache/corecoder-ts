@@ -211,12 +211,21 @@ test('usageSeen flips only when the provider actually reports usage', async () =
     const noUsage = new LLM({ model: 'm', apiKey: 'k' })
     await drain(noUsage.chat([{ role: 'user', content: 'hi' }]))
     assert.equal(noUsage.usageSeen, false, 'no usage chunk → stays unknown')
+    assert.equal(noUsage.usageMissed, true, 'a usage-less response marks the totals incomplete')
+
+    // a usage OBJECT with null fields is not data either
+    globalThis.fetch = (async () =>
+      sseResponse([chunk(',"usage":{"prompt_tokens":null,"completion_tokens":null}')])) as typeof fetch
+    const nullUsage = new LLM({ model: 'm', apiKey: 'k' })
+    await drain(nullUsage.chat([{ role: 'user', content: 'hi' }]))
+    assert.equal(nullUsage.usageSeen, false, 'null-field usage must not dress unknown up as 0')
 
     globalThis.fetch = (async () =>
       sseResponse([chunk(',"usage":{"prompt_tokens":5,"completion_tokens":2}')])) as typeof fetch
     const withUsage = new LLM({ model: 'm', apiKey: 'k' })
     await drain(withUsage.chat([{ role: 'user', content: 'hi' }]))
     assert.equal(withUsage.usageSeen, true)
+    assert.equal(withUsage.usageMissed, false)
   } finally {
     globalThis.fetch = originalFetch
   }

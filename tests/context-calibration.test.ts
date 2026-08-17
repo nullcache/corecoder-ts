@@ -65,3 +65,18 @@ test('agent registers system prompt and tool schemas as fixed overhead', () => {
   const measured = agent.context.measure(agent.messages)
   assert.ok(measured > 0, 'empty history should measure the fixed overhead, got ' + measured)
 })
+
+test('a CJK-rate conversation does not inflate the English fixed overhead', () => {
+  const cm = new ContextManager(100_000)
+  cm.setFixedOverhead('x'.repeat(600)) // F_est = 200, English-ish (true rate ≈ 1)
+  const big = [msg('user', '汉'.repeat(3000))] // est = 1000, true CJK rate ≈ 3
+  cm.observe(200 + 3000, big) // real = fixed(200) + messages(3000)
+
+  // after compression the history is tiny; the fixed part must NOT be
+  // scaled by the CJK multiplier
+  const small = [msg('user', '汉'.repeat(66))] // est = 22, true ≈ 66
+  const measured = cm.measure(small) // expected ≈ 66×? … 22×3 + 200 = 266
+  assert.ok(measured >= 240 && measured <= 300, `expected ≈266, got ${measured}`)
+  // the old blended formula gave (22+200) × (3200/1200) ≈ 592
+  assert.ok(measured < 400, `fixed overhead was inflated by the CJK rate: ${measured}`)
+})

@@ -24,4 +24,4 @@ export {
 export { systemPrompt } from './prompt.js'
 export { listSessions, loadSession, saveSession } from './session.js'
 export { toSchema, missingArgs, type Tool } from './tools/base.js'
-export { ALL_TOOLS, getTool } from './tools/index.js'
+export { makeAllTools } from './tools/index.js'
