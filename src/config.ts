@@ -53,6 +53,8 @@ export interface Config {
   maxTokens: number
   temperature: number
   maxContextTokens: number
+  /** Per-request timeout for the LLM client, in ms. */
+  timeoutMs: number
 }
 
 /** Parse an integer env var; garbage (or trailing junk) falls back to the default. */
@@ -85,5 +87,6 @@ export function configFromEnv(): Config {
     maxTokens: intFromEnv('CORECODER_MAX_TOKENS', 4096),
     temperature: floatFromEnv('CORECODER_TEMPERATURE', 0),
     maxContextTokens: intFromEnv('CORECODER_MAX_CONTEXT', 128000),
+    timeoutMs: intFromEnv('CORECODER_TIMEOUT_MS', 300000),
   }
 }

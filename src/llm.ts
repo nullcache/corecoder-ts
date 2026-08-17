@@ -159,19 +159,23 @@ export class LLM implements LLMClient {
 
   private apiKey: string
   private baseUrl: string
+  private timeoutMs: number
   private extra: Record<string, unknown>
 
   constructor(opts: {
     model: string
     apiKey: string
     baseUrl?: string | null
+    /** How long to wait for each request before giving up and retrying. */
+    timeoutMs?: number
     /** temperature, max_tokens, etc. — forwarded verbatim to the API */
     [k: string]: unknown
   }) {
-    const { model, apiKey, baseUrl, ...extra } = opts
+    const { model, apiKey, baseUrl, timeoutMs, ...extra } = opts
     this.model = model
     this.apiKey = apiKey
     this.baseUrl = (baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '')
+    this.timeoutMs = timeoutMs ?? 300_000 // 5 minutes
     this.extra = extra
   }
 
@@ -306,6 +310,26 @@ export class LLM implements LLMClient {
   }
 
   private async callOnce(params: Record<string, unknown>, signal?: AbortSignal): Promise<Response> {
+    // Node's fetch has no timeout option (RequestInit.timeout is silently
+    // ignored), so a provider that accepts the connection and then never
+    // answers would hang the agent forever. Race the request against a timer:
+    // the timer aborts the fetch and we translate that into a retryable
+    // transient error. A user cancellation must pass through untouched — the
+    // controller is aborted by the user's signal first, before the timer can
+    // claim it.
+    const controller = new AbortController()
+    let timedOut = false
+    const onAbort = () => controller.abort()
+    if (signal?.aborted) {
+      controller.abort()
+    } else {
+      signal?.addEventListener('abort', onAbort, { once: true })
+    }
+    const timer = setTimeout(() => {
+      timedOut = true
+      controller.abort()
+    }, this.timeoutMs)
+
     let res: Response
     try {
       res = await fetch(`${this.baseUrl}/chat/completions`, {
@@ -315,12 +339,20 @@ export class LLM implements LLMClient {
           authorization: `Bearer ${this.apiKey}`,
         },
         body: JSON.stringify(params),
-        signal: signal ?? null,
+        signal: controller.signal,
       })
     } catch (e) {
       // user cancellation must not be retried
-      if (e instanceof Error && e.name === 'AbortError') throw e
+      if (e instanceof Error && e.name === 'AbortError') {
+        if (timedOut) {
+          throw new TransientError(`request timed out after ${this.timeoutMs}ms`)
+        }
+        throw e
+      }
       throw new TransientError(`connection error: ${e}`)
+    } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
     }
 
     if (res.ok) return res
