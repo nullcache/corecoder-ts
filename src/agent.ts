@@ -155,8 +155,11 @@ export class Agent {
         // The consumer can abandon us at the text yield above, and hand-driven
         // .next() gets none of yield*'s auto-close propagation — close the
         // inner generator so its own finally runs (the SSE reader is cancelled
-        // and the connection released). No-op after normal completion.
-        if (!step?.done) void stream.return(undefined as unknown as LLMResponse)
+        // and the connection released). Awaited: for-await's break waits on
+        // our return(), so teardown must complete inside it — fire-and-forget
+        // would leak the cleanup past the break (and turn a throwing inner
+        // finally into an unhandled rejection). No-op after normal completion.
+        if (!step?.done) await stream.return(undefined as unknown as LLMResponse)
       }
       const resp = step!.value as LLMResponse
 

@@ -438,9 +438,10 @@ async function* sseEvents(
     }
   } finally {
     signal?.removeEventListener('abort', onAbort)
-    // close the connection on every exit path (early return, error, abort);
-    // cancel also releases the lock
-    void reader.cancel().catch(() => {})
+    // close the connection on every exit path (early return, error, abort).
+    // Awaited so a consumer tearing down the generator chain observes the
+    // connection as closed by the time its return() resolves.
+    await reader.cancel().catch(() => {})
   }
 }
 

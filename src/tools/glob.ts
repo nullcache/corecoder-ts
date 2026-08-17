@@ -41,13 +41,31 @@ export function globToRegExp(pattern: string): RegExp {
       re += '[^/]'
       i += 1
     } else if (ch === '[') {
-      // character class, e.g. `*.[ch]` or `[!abc]` — escaping the brackets
-      // (the old behavior) made such patterns silently match nothing
-      const end = pattern.indexOf(']', i + 2) // i+2: allow ']' as first member
+      // Character class with Python-fnmatch semantics: `[abc]`, `[!abc]`
+      // negation, `a-z` ranges. Faithfully: `^` is a literal member (only
+      // `!` negates), a `]` right after `[` or `[!` is a literal member,
+      // and an invalid range like `[z-a]` matches nothing instead of
+      // blowing up the whole pattern. Not a full glob dialect — no braces,
+      // no extglob — and that's deliberate.
+      let j = i + 1
+      let negate = false
+      if (pattern[j] === '!') {
+        negate = true
+        j++
+      }
+      // scan for the closing ']', skipping one that is the first member
+      const scanFrom = pattern[j] === ']' ? j + 1 : j
+      const end = pattern.indexOf(']', scanFrom)
       if (end !== -1) {
-        let cls = pattern.slice(i + 1, end)
-        if (cls.startsWith('!')) cls = '^' + cls.slice(1)
-        re += '[' + cls.replace(/\\/g, '\\\\') + ']'
+        // escape everything regex-special inside a class except '-' (ranges)
+        const body = pattern.slice(j, end).replace(/[\\\]^]/g, '\\$&')
+        const cls = '[' + (negate ? '^' : '') + body + ']'
+        try {
+          new RegExp(cls)
+          re += cls
+        } catch {
+          re += '(?!)' // invalid range: fnmatch matches nothing, so do we
+        }
         i = end + 1
       } else {
         re += '\\[' // unclosed bracket: treat as a literal

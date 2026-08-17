@@ -171,6 +171,22 @@ test('globToRegExp handles ./ prefixes and character classes', () => {
   assert.ok(!globToRegExp('[!a]*.md').test('a.md'))
 })
 
+test('character classes follow Python fnmatch semantics on the edge cases', () => {
+  // ^ is a literal member — only ! negates
+  assert.ok(globToRegExp('[^a].md').test('^.md'))
+  assert.ok(globToRegExp('[^a].md').test('a.md'))
+  assert.ok(!globToRegExp('[^a].md').test('b.md'))
+  // ] right after [ is a literal member
+  assert.ok(globToRegExp('[]].md').test('].md'))
+  assert.ok(!globToRegExp('[]].md').test('a.md'))
+  // [!]] means "not ]"
+  assert.ok(globToRegExp('[!]].md').test('a.md'))
+  assert.ok(!globToRegExp('[!]].md').test('].md'))
+  // an invalid range matches nothing instead of throwing
+  assert.doesNotThrow(() => globToRegExp('[z-a].md'))
+  assert.ok(!globToRegExp('[z-a].md').test('m.md'))
+})
+
 test('glob tool matches ./-prefixed and class patterns against a real tree', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-fix-glob-'))
   await fs.writeFile(path.join(dir, 'a.c'), '')
@@ -225,9 +241,9 @@ test('abandoning chat() during text streaming closes the SSE connection', async 
     for await (const ev of agent.chat('hi')) {
       if (ev.type === 'text') break // abandon mid-stream
     }
-    // stream.return() is fire-and-forget; give it a beat to land
-    await new Promise(r => setTimeout(r, 100))
-    assert.equal(cancelled, true, 'the SSE body must be cancelled when the turn is abandoned')
+    // break awaits the generator chain's return(), so teardown must have
+    // fully completed by this line — no sleep allowed
+    assert.equal(cancelled, true, 'the SSE body must be cancelled by the time break returns')
   } finally {
     globalThis.fetch = originalFetch
   }
