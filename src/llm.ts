@@ -66,37 +66,6 @@ export class LLMResponse {
   }
 }
 
-// ---------------------------------------------------------------- pricing
-
-/** Pricing per million tokens: [input, output]. Same table as the Python version. */
-const PRICING: Record<string, [number, number]> = {
-  // OpenAI - current flagships
-  'gpt-5.5': [5, 30],
-  'gpt-5.4': [2.5, 15],
-  'gpt-5.4-mini': [0.75, 4.5],
-  'gpt-5.4-nano': [0.2, 1.25],
-  'o4-mini': [1.1, 4.4],
-  // OpenAI - previous gen (still widely used)
-  'gpt-4.1': [2, 8],
-  'gpt-4.1-mini': [0.4, 1.6],
-  'gpt-4.1-nano': [0.1, 0.4],
-  'gpt-4o': [2.5, 10],
-  'gpt-4o-mini': [0.15, 0.6],
-  // DeepSeek
-  'deepseek-chat': [0.27, 1.1],
-  'deepseek-reasoner': [0.55, 2.19],
-  // Anthropic Claude
-  'claude-opus-4-6': [5, 25],
-  'claude-sonnet-4-6': [3, 15],
-  'claude-haiku-4-5': [1, 5],
-  // Alibaba Qwen
-  'qwen3-max': [0.78, 3.9],
-  'qwen3-plus': [0.26, 0.78],
-  'qwen-max': [0.78, 3.9],
-  // Moonshot Kimi
-  'kimi-k2.5': [0.6, 3],
-}
-
 // ---------------------------------------------------------------- interface
 
 /**
@@ -109,7 +78,6 @@ export interface LLMClient {
   totalCompletionTokens: number
   /** True once any response has carried usage data — /tokens shows 'unknown' until then. */
   usageSeen: boolean
-  readonly estimatedCost: number | null
   chat(
     messages: ChatMessage[],
     tools?: ToolSchema[],
@@ -182,16 +150,6 @@ export class LLM implements LLMClient {
     this.extra = extra
   }
 
-  /** Rough cost estimate in USD. Null if the model isn't in the pricing table. */
-  get estimatedCost(): number | null {
-    const pricing = PRICING[this.model]
-    if (!pricing) return null
-    const [inputRate, outputRate] = pricing
-    return (
-      (this.totalPromptTokens * inputRate) / 1_000_000 +
-      (this.totalCompletionTokens * outputRate) / 1_000_000
-    )
-  }
 
   /**
    * Send messages; yield text deltas as they stream in; return the full
@@ -466,9 +424,6 @@ export class ScriptedLLM implements LLMClient {
     this.turns = [...script]
   }
 
-  get estimatedCost(): number | null {
-    return null
-  }
 
   async *chat(
     _messages: ChatMessage[],

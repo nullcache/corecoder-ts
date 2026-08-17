@@ -1,7 +1,7 @@
 # corecoder-ts
 
 A TypeScript port of [CoreCoder](https://github.com/he-yufeng/CoreCoder) — a minimal AI coding agent
-that runs in your terminal. Roughly 2,800 lines of source (plus ~1,050 lines of tests), zero runtime
+that runs in your terminal. Roughly 2,750 lines of source (plus ~1,100 lines of tests), zero runtime
 dependencies, and the whole thing is
 meant to be read: each module is a distilled version of the same idea from Claude Code, with the
 commentary on *why* it's shaped that way.
@@ -110,7 +110,7 @@ parent directory up to your home directory works too, without overriding variabl
 | `/help` | Show all commands |
 | `/reset` | Clear conversation history |
 | `/model` / `/model <name>` | Show or switch the model mid-conversation |
-| `/tokens` | Show token usage and estimated cost |
+| `/tokens` | Show token usage |
 | `/compact` | Manually compress the conversation context |
 | `/diff` | List files modified this session |
 | `/save` | Save the session to disk |

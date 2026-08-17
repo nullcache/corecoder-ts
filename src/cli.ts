@@ -329,10 +329,9 @@ async function handleCommand(input: string, agent: Agent, config: Config): Promi
     }
     const p = agent.llm.totalPromptTokens
     const c = agent.llm.totalCompletionTokens
-    let line = `Tokens: ${cyan(String(p))} prompt + ${cyan(String(c))} completion = ${bold(String(p + c))} total`
-    const cost = agent.llm.estimatedCost
-    if (cost !== null) line += `  (~$${cost.toFixed(4)})`
-    console.log(line)
+    console.log(
+      `Tokens: ${cyan(String(p))} prompt + ${cyan(String(c))} completion = ${bold(String(p + c))} total`,
+    )
     return true
   }
   if (input === '/model' || input.startsWith('/model ')) {
