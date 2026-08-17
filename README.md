@@ -110,7 +110,7 @@ parent directory up to your home directory works too, without overriding variabl
 | `/help` | Show all commands |
 | `/reset` | Clear conversation history |
 | `/model` / `/model <name>` | Show or switch the model mid-conversation |
-| `/tokens` | Show token usage and estimated cost |
+| `/tokens` | Show token usage |
 | `/compact` | Manually compress the conversation context |
 | `/diff` | List files modified this session |
 | `/save` | Save the session to disk |

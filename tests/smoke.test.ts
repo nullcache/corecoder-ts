@@ -108,7 +108,6 @@ test('abort mid-stream marks the turn [interrupted by user]', async () => {
     totalPromptTokens: 0,
     usageSeen: true,
     totalCompletionTokens: 0,
-    estimatedCost: null,
     // eslint-disable-next-line require-yield
     async *chat(): AsyncGenerator<string, LLMResponse> {
       throw new DOMException('Aborted', 'AbortError')
