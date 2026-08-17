@@ -1,12 +1,22 @@
 # corecoder-ts
 
 A TypeScript port of [CoreCoder](https://github.com/he-yufeng/CoreCoder) — a minimal AI coding agent
-that runs in your terminal. Roughly 2,400 lines, zero runtime dependencies, and the whole thing is
+that runs in your terminal. Roughly 2,600 lines of source (plus ~850 lines of tests), zero runtime
+dependencies, and the whole thing is
 meant to be read: each module is a distilled version of the same idea from Claude Code, with the
 commentary on *why* it's shaped that way.
 
 > Built for people who want to understand how an agent actually works, not for people who want a
 > feature-complete product. If you need the latter, go use Claude Code or Cline.
+
+## Branches
+
+- **`min`** (default) — the minimal viable version: the core behavior, without much edge-case
+  handling.
+- **`dev`** — the enhanced branch: everything in `min`, plus CI, npm publish hygiene, and broader
+  edge-case robustness.
+
+`min` is merged into `dev` regularly; nothing flows the other way.
 
 ## Features
 
@@ -96,6 +106,7 @@ parent directory works too, without overriding variables already set):
 | `CORECODER_MAX_TOKENS` | `4096` | `max_tokens` sent to the API |
 | `CORECODER_TEMPERATURE` | `0` | Sampling temperature |
 | `CORECODER_MAX_CONTEXT` | `128000` | Context budget that triggers compression |
+| `CORECODER_TIMEOUT_MS` | `300000` | Per-request timeout for LLM calls, in ms (timeouts retry as transient errors) |
 
 ## REPL commands
 
@@ -157,7 +168,9 @@ Three layers, cheapest first:
 3. **Hard collapse** near the hard limit — summary + last few messages only
 
 The char-based token estimate is calibrated against the API's reported `prompt_tokens` after each
-round, which absorbs CJK text density and the fixed system/tool-schema overhead.
+round, which absorbs CJK text density. The fixed system-prompt/tool-schema overhead is counted as a
+separate additive term, so the calibration ratio stays a pure chars-to-tokens rate and survives
+compression.
 
 ### Sessions (`src/session.ts`)
 
@@ -201,6 +214,7 @@ src/
   render.ts     streaming markdown renderer for the terminal
   tools/        bash, read/write/edit, glob, grep, sub-agent
 tests/          node:test suites (no network required)
+scripts/        cross-version test runner (node --test glob expansion is Node 21+)
 ```
 
 ## Relationship to CoreCoder
