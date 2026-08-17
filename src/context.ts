@@ -99,15 +99,6 @@ export class ContextManager {
     let current = this.measure(messages)
     let compressed = false
 
-    // Layer 0: a single message so large it alone busts the window can't be
-    // helped by any layer below — layer 1 only snips tool replies, layers
-    // 2/3 are gated on message *count*. Without this, a huge one-shot prompt
-    // 413s on every turn (and /compact can't fix it either).
-    if (current > this.collapseAt && this.truncateOversized(messages)) {
-      compressed = true
-      current = this.measure(messages)
-    }
-
     // Layer 1: snip verbose tool outputs
     if (current > this.snipAt) {
       if (this.snipToolOutputs(messages)) {
@@ -133,28 +124,6 @@ export class ContextManager {
     return compressed
   }
 
-  /**
-   * Layer 0: head+tail truncate any single message whose content alone
-   * exceeds the hard-collapse threshold. Rare, but the only exit from an
-   * otherwise-permanent 413 loop.
-   */
-  private truncateOversized(messages: ChatMessage[]): boolean {
-    // budget in chars: the collapse threshold un-scaled back to chars, split
-    // across head and tail. Conservative on purpose.
-    const maxChars = Math.max(2000, Math.floor((this.collapseAt / this.ratio) * 3))
-    let changed = false
-    for (const m of messages) {
-      const content = m.content ?? ''
-      if (typeof content !== 'string' || content.length <= maxChars) continue
-      const half = Math.floor(maxChars / 2)
-      m.content =
-        content.slice(0, half) +
-        `\n... (${content.length} chars, middle truncated to fit the context window) ...\n` +
-        content.slice(-half)
-      changed = true
-    }
-    return changed
-  }
 
   /**
    * Layer 1: truncate tool results over 1500 chars to their first/last lines.

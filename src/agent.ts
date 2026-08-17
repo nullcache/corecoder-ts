@@ -23,7 +23,7 @@
  */
 
 import { ContextManager } from './context.js'
-import type { ChatMessage, LLMClient, ToolCallReq, ToolSchema } from './llm.js'
+import type { ChatMessage, LLMClient, LLMResponse, ToolCallReq, ToolSchema } from './llm.js'
 import { missingArgs, toSchema, type Tool } from './tools/base.js'
 import { SubAgentTool } from './tools/agent.js'
 import { makeAllTools } from './tools/index.js'
@@ -84,6 +84,18 @@ export class Agent {
    * Yields progress events; returns the model's final text answer.
    */
   async *chat(userInput: string, signal?: AbortSignal): AsyncGenerator<AgentEvent, string> {
+    // A single message larger than the whole context window can never be
+    // sent — no compression layer can shrink *one* message, so it would just
+    // 413 on every turn. Refuse up front and keep it out of the history.
+    // measure() includes the fixed system-prompt/tool-schema overhead.
+    const inputTokens = this.context.measure([{ role: 'user', content: userInput }])
+    if (inputTokens > this.context.maxTokens) {
+      return (
+        `Error: this message is ~${inputTokens} tokens, larger than the ` +
+        `${this.context.maxTokens}-token context window. Shorten the input or raise CORECODER_MAX_CONTEXT.`
+      )
+    }
+
     this.messages.push({ role: 'user', content: userInput })
     await this.context.maybeCompress(this.messages, this.llm, signal)
 
@@ -132,12 +144,21 @@ export class Agent {
       // strings while we yield typed events — the .done/.value dance below
       // is exactly what yield* does under the hood.
       const stream = this.llm.chat(this.fullMessages(), this.toolSchemas(), signal)
-      let step = await stream.next()
-      while (!step.done) {
-        yield { type: 'text', delta: step.value }
+      let step: IteratorResult<string, LLMResponse> | undefined
+      try {
         step = await stream.next()
+        while (!step.done) {
+          yield { type: 'text', delta: step.value }
+          step = await stream.next()
+        }
+      } finally {
+        // The consumer can abandon us at the text yield above, and hand-driven
+        // .next() gets none of yield*'s auto-close propagation — close the
+        // inner generator so its own finally runs (the SSE reader is cancelled
+        // and the connection released). No-op after normal completion.
+        if (!step?.done) void stream.return(undefined as unknown as LLMResponse)
       }
-      const resp = step.value
+      const resp = step!.value as LLMResponse
 
       // Calibrate the compressor's char-based estimate against the real
       // prompt_tokens the API just billed for. Must happen before pushing

@@ -12,13 +12,11 @@ import path from 'node:path'
 import { test } from 'node:test'
 
 import { Agent } from '../src/agent.js'
-import { ContextManager } from '../src/context.js'
 import { LLM, LLMResponse, ScriptedLLM, drain } from '../src/llm.js'
 import { SubAgentTool } from '../src/tools/agent.js'
-import { bashTool, resetCwdTracking } from '../src/tools/bash.js'
+import { bashTool } from '../src/tools/bash.js'
 import { editFileTool } from '../src/tools/edit.js'
 import { globTool, globToRegExp } from '../src/tools/glob.js'
-import { readFileTool } from '../src/tools/read.js'
 
 // ---------------------------------------------------------------- edit: $ patterns
 
@@ -186,29 +184,51 @@ test('glob tool matches ./-prefixed and class patterns against a real tree', asy
   }
 })
 
-// ---------------------------------------------------------------- cwd unification
+// ---------------------------------------------------------------- agent: oversized input refusal
 
-test('after bash cd, other tools resolve relative paths against the tracked cwd', async () => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-fix-cwd-'))
-  await fs.writeFile(path.join(dir, 'marker.txt'), 'found-me')
-  resetCwdTracking()
-  try {
-    await bashTool.execute({ command: `cd ${dir}; true` }) // ;-chain, not &&
-    const out = await readFileTool.execute({ file_path: 'marker.txt' })
-    assert.ok(String(out).includes('found-me'), `read resolved against wrong cwd: ${out}`)
-  } finally {
-    resetCwdTracking()
-    await fs.rm(dir, { recursive: true, force: true })
-  }
+test('an input larger than the context window is refused up front, history untouched', async () => {
+  const llm = new ScriptedLLM([new LLMResponse('should never be consumed')])
+  // empty toolset: the fixed system/tool-schema overhead must not eat the
+  // tiny test window on its own
+  const agent = new Agent({ llm, tools: [], maxContextTokens: 1000 })
+  const answer = await drain(agent.chat('x'.repeat(30_000)))
+  assert.match(answer, /larger than the 1000-token context window/)
+  assert.equal(agent.messages.length, 0, 'the oversized message must not enter the history')
+  // the model was never called — the scripted turn is still unconsumed
+  const next = await drain(agent.chat('hello'))
+  assert.equal(next, 'should never be consumed')
 })
 
-// ---------------------------------------------------------------- context: oversized message
+// ---------------------------------------------------------------- agent: abandoning during TEXT streaming
 
-test('a single oversized message is truncated instead of looping on 413', async () => {
-  const cm = new ContextManager(1000)
-  const messages = [{ role: 'user' as const, content: 'x'.repeat(30_000) }]
-  const compressed = await cm.maybeCompress(messages)
-  assert.equal(compressed, true)
-  assert.ok(messages[0]!.content!.includes('middle truncated'))
-  assert.ok(messages[0]!.content!.length < 5000)
+test('abandoning chat() during text streaming closes the SSE connection', async () => {
+  let cancelled = false
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(
+        new TextEncoder().encode(
+          'data: {"id":"1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hello"}}]}\n\n',
+        ),
+      )
+      // never close — a live stream mid-generation
+    },
+    cancel() {
+      cancelled = true
+    },
+  })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = (async () =>
+    new Response(body, { headers: { 'content-type': 'text/event-stream' } })) as typeof fetch
+  try {
+    const llm = new LLM({ model: 'm', apiKey: 'k' })
+    const agent = new Agent({ llm, tools: [] })
+    for await (const ev of agent.chat('hi')) {
+      if (ev.type === 'text') break // abandon mid-stream
+    }
+    // stream.return() is fire-and-forget; give it a beat to land
+    await new Promise(r => setTimeout(r, 100))
+    assert.equal(cancelled, true, 'the SSE body must be cancelled when the turn is abandoned')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
 })

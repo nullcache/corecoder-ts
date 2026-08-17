@@ -444,7 +444,9 @@ if (process.argv[1]) {
   try {
     isDirectRun = import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
   } catch {
-    isDirectRun = false
+    // realpath can fail in exotic embeddings — fall back to the plain compare
+    // rather than silently refusing to start
+    isDirectRun = import.meta.url === pathToFileURL(process.argv[1]).href
   }
 }
 if (isDirectRun) {

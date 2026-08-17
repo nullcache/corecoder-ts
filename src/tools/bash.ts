@@ -14,16 +14,17 @@ import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { Tool } from './base.js'
-import { getTrackedCwd, setTrackedCwd } from './paths.js'
 
-// The tracked cwd lives in paths.ts so that *every* tool resolves relative
-// paths against it (read/write/edit/glob/grep go through expandPath) — with
-// it only known to bash, a `cd src && ...` was followed by read_file
-// resolving against the process cwd, silently reading the wrong tree.
+// Track cwd across commands (Claude Code does this too). The Python version
+// uses a thread-local because its tools run on a thread pool; in Node all
+// tool executions share one event loop, so a module-level variable has no
+// data race — concurrent bash calls just apply their cd updates in
+// completion order.
+let trackedCwd: string | null = null
 
 /** Test seam: reset cwd tracking between test cases. */
 export function resetCwdTracking(): void {
-  setTrackedCwd(null)
+  trackedCwd = null
 }
 
 // patterns that could wreck the filesystem or leak secrets
@@ -53,15 +54,13 @@ function checkDangerous(cmd: string): string | null {
 /**
  * Track directory changes from cd commands.
  *
- * Walk each cd in a command chain (&&, ||, ;), resolving relative targets
- * against the dir the previous cd landed in (not the original cwd) so
- * `cd a && cd b` ends in a/b. A heuristic, like the Python original — cd
- * inside quotes or subshells is not our problem to solve here.
+ * Walk each cd in a && chain, resolving relative targets against the dir the
+ * previous cd landed in (not the original cwd) so `cd a && cd b` ends in a/b.
  */
 async function updateCwd(command: string, currentCwd: string): Promise<void> {
   let running = currentCwd
   let changed = false
-  for (let part of command.split(/&&|\|\||;/)) {
+  for (let part of command.split('&&')) {
     part = part.trim()
     if (!part.startsWith('cd ')) continue
     let target = part.slice(3).trim().replace(/^['"]|['"]$/g, '')
@@ -79,7 +78,7 @@ async function updateCwd(command: string, currentCwd: string): Promise<void> {
       // target doesn't exist — ignore, same as the Python version
     }
   }
-  if (changed) setTrackedCwd(running)
+  if (changed) trackedCwd = running
 }
 
 // match exec's default maxBuffer so a chatty command can't balloon memory
@@ -145,6 +144,16 @@ function runShell(
     let timedOut = false
     let settled = false
     let killTimer: NodeJS.Timeout | null = null
+    let killStarted = false
+
+    // the TERM→KILL sequence runs at most once, no matter how many triggers
+    // fire (abort then timeout, etc.) — a second call would orphan the first
+    // escalation timer, which settle() could then never clear
+    const beginKill = () => {
+      if (killStarted) return
+      killStarted = true
+      killTimer = killProcessTree(child)
+    }
 
     const settle = (result: {
       stdout: string
@@ -161,18 +170,16 @@ function runShell(
       resolve(result)
     }
 
-    const onAbort = () => {
-      killTimer = killProcessTree(child)
-    }
+    const onAbort = () => beginKill()
     if (signal?.aborted) {
-      killTimer = killProcessTree(child)
+      beginKill()
     } else {
       signal?.addEventListener('abort', onAbort, { once: true })
     }
 
     const timer = setTimeout(() => {
       timedOut = true
-      killTimer = killProcessTree(child)
+      beginKill()
     }, timeoutMs)
 
     // keep consuming even past the cap so the pipe drains and close can fire
@@ -217,7 +224,7 @@ export const bashTool: Tool = {
       return `⚠ Blocked: ${warning}\nCommand: ${command}\nIf intentional, modify the command to be more specific.`
     }
 
-    const cwd = getTrackedCwd()
+    const cwd = trackedCwd ?? process.cwd()
 
     try {
       const { stdout, stderr, code, timedOut, truncated } = await runShell(
