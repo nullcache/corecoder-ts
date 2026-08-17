@@ -84,10 +84,10 @@ export class Agent {
    * Yields progress events; returns the model's final text answer.
    */
   async *chat(userInput: string, signal?: AbortSignal): AsyncGenerator<AgentEvent, string> {
-    this.messages.push({ role: 'user', content: userInput })
-    await this.context.maybeCompress(this.messages, this.llm, signal)
-
     try {
+      this.messages.push({ role: 'user', content: userInput })
+      await this.context.maybeCompress(this.messages, this.llm, signal)
+
       // yield* forwards every event and evaluates to rounds()'s return value
       return yield* this.rounds(signal)
     } catch (e) {
