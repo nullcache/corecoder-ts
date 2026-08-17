@@ -139,6 +139,12 @@ export class Agent {
           this.messages.push({ role: 'tool', tool_call_id: tc.id, content: results[i]! })
           yield { type: 'tool_end', name: tc.name, result: results[i]! }
         }
+
+        // a signal that fired during execution (e.g. a long bash command that
+        // just got killed) must end the turn now — no point paying for another
+        // LLM round that will abort the instant it starts. History is already
+        // consistent: every tool call above got its reply.
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
       } catch (e) {
         // An abort mid-execution would leave the assistant tool_calls message
         // without replies, poisoning the next request; backfill before
@@ -168,8 +174,14 @@ export class Agent {
       return `Error: bad arguments for ${tc.name}: missing required ${missing.join(', ')}`
     }
     try {
-      return await tool.execute(tc.arguments)
+      return await tool.execute(tc.arguments, signal)
     } catch (e) {
+      // cancellation is a control flow, not a tool failure: a tool that throws
+      // AbortError (killed bash child, aborted sub-agent, aborted walk) must
+      // propagate so the turn unwinds and pending replies get backfilled —
+      // stringifying it would feed "Error executing bash: AbortError" back to
+      // the model and the turn would limp on.
+      if (e instanceof DOMException && e.name === 'AbortError') throw e
       return `Error executing ${tc.name}: ${e}`
     }
   }

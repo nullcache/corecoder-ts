@@ -20,11 +20,13 @@ const SKIP_DIRS = new Set([
 const MAX_FILES = 5000
 const MAX_MATCHES = 200
 
-async function collectFiles(root: string, include?: string): Promise<string[]> {
+async function collectFiles(root: string, include?: string, signal?: AbortSignal): Promise<string[]> {
   const includeRe = include ? globToRegExp(include.includes('/') ? include : `**/${include}`) : null
   const results: string[] = []
   const stack = ['']
   while (stack.length > 0 && results.length < MAX_FILES) {
+    // walking up to 5000 files can take seconds; stop promptly on Ctrl+C
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
     const relDir = stack.pop()!
     let entries
     try {
@@ -58,7 +60,7 @@ export const grepTool: Tool = {
     required: ['pattern'],
   },
 
-  async execute(args) {
+  async execute(args, signal?: AbortSignal) {
     const pattern = String(args.pattern ?? '')
     const searchPath = String(args.path ?? '.')
     const include = args.include ? String(args.include) : undefined
@@ -70,14 +72,17 @@ export const grepTool: Tool = {
       return `Invalid regex: ${e}`
     }
 
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
     const base = expandPath(searchPath)
     const stat = await fs.stat(base).catch(() => null)
     if (!stat) return `Error: ${searchPath} not found`
 
-    const files = stat.isFile() ? [base] : await collectFiles(base, include)
+    const files = stat.isFile() ? [base] : await collectFiles(base, include, signal)
 
     const matches: string[] = []
     for (const fp of files) {
+      // grep reads each file fully; check so a large tree still aborts promptly
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
       let text: string
       try {
         text = await fs.readFile(fp, 'utf8')

@@ -50,10 +50,15 @@ export function globToRegExp(pattern: string): RegExp {
 const SKIP_DIRS = new Set(['.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build'])
 const MAX_WALK = 20_000
 
-async function walk(root: string): Promise<Array<{ rel: string; abs: string; mtime: number }>> {
+async function walk(
+  root: string,
+  signal?: AbortSignal,
+): Promise<Array<{ rel: string; abs: string; mtime: number }>> {
   const results: Array<{ rel: string; abs: string; mtime: number }> = []
   const stack = ['']
   while (stack.length > 0 && results.length < MAX_WALK) {
+    // a walk over up to 20k files can take seconds; stop promptly on Ctrl+C
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
     const relDir = stack.pop()!
     const absDir = path.join(root, relDir)
     let entries
@@ -93,17 +98,18 @@ export const globTool: Tool = {
     required: ['pattern'],
   },
 
-  async execute(args) {
+  async execute(args, signal?: AbortSignal) {
     const pattern = String(args.pattern ?? '')
     const searchPath = String(args.path ?? '.')
 
     try {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
       const base = expandPath(searchPath)
       const stat = await fs.stat(base).catch(() => null)
       if (!stat?.isDirectory()) return `Error: ${searchPath} is not a directory`
 
       const regex = globToRegExp(pattern)
-      const hits = (await walk(base)).filter(f => regex.test(f.rel))
+      const hits = (await walk(base, signal)).filter(f => regex.test(f.rel))
 
       // sort by mtime, newest first
       hits.sort((a, b) => b.mtime - a.mtime)
@@ -114,6 +120,8 @@ export const globTool: Tool = {
       if (total > 100) result += `\n... (${total} matches, showing first 100)`
       return result || 'No files matched.'
     } catch (e) {
+      // cancellation must propagate as an interrupt, not become a tool result
+      if (e instanceof DOMException && e.name === 'AbortError') throw e
       return `Error: ${e}`
     }
   },
