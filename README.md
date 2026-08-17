@@ -11,10 +11,9 @@ commentary on *why* it's shaped that way.
 
 ## Branches
 
-- **`min`** (default) — the minimal viable version: the core behavior, without much edge-case
-  handling.
-- **`dev`** — the enhanced branch: everything in `min`, plus CI, npm publish hygiene, and broader
-  edge-case robustness.
+- **`min`** (default) — the minimal viable version: the core behavior, kept as small as possible.
+- **`dev`** — the enhanced branch: functional enhancements on top of `min`, no longer bound by
+  the minimal bar.
 
 `min` is merged into `dev` regularly; nothing flows the other way.
 
@@ -33,11 +32,7 @@ commentary on *why* it's shaped that way.
 
 ## Install
 
-```bash
-npm install -g corecoder-ts
-```
-
-Or run from source:
+Run from source:
 
 ```bash
 git clone https://github.com/nullcache/corecoder-ts.git
@@ -65,7 +60,7 @@ export CORECODER_MODEL=deepseek-chat
 corecoder-ts
 ```
 
-Ollama (local, no API key needed):
+Ollama (local, dummy API key):
 
 ```bash
 export OPENAI_API_KEY=ollama
@@ -96,7 +91,7 @@ corecoder-ts [options]
 ```
 
 Configuration is read from environment variables (a `.env` file in the working directory or any
-parent directory works too, without overriding variables already set):
+parent directory up to your home directory works too, without overriding variables already set):
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -222,8 +217,8 @@ scripts/        cross-version test runner (node --test glob expansion is Node 21
 This is a faithful port of the Python [CoreCoder](https://github.com/he-yufeng/CoreCoder), with a
 few deliberate upgrades — most notably the async-generator event stream (the Python version uses
 `on_token`/`on_tool` callbacks), a streaming markdown renderer, and real `prompt_tokens` calibration
-for context compression. The design commentary in each module references both the Claude Code source
-it distills and the Python original it ports.
+for context compression. The design commentary throughout references the Claude Code mechanisms
+being distilled and the Python original being ported.
 
 ## License
 
