@@ -138,14 +138,14 @@ test('a stream that stops producing raises a stall error instead of hanging', as
 
 // ---------------------------------------------------------------- bash: SIGKILL escalation
 
-test('a TERM-ignoring child is SIGKILLed after the grace period', { skip: process.platform === 'win32' }, async () => {
+test('kill goes straight to SIGKILL, so a TERM-trapping child cannot wedge the turn', { skip: process.platform === 'win32' }, async () => {
   const t0 = Date.now()
   const out = await bashTool.execute({
     command: `bash -c "trap '' TERM; sleep 30"`,
     timeout: 1,
   })
   assert.ok(String(out).includes('timed out'), `expected timeout result, got: ${out}`)
-  assert.ok(Date.now() - t0 < 9000, 'must settle via SIGKILL escalation, not wait 30s')
+  assert.ok(Date.now() - t0 < 5000, 'must settle immediately after the timeout SIGKILL')
 })
 
 // ---------------------------------------------------------------- tools: per-agent instances
@@ -200,19 +200,26 @@ test('glob tool matches ./-prefixed and class patterns against a real tree', asy
   }
 })
 
-// ---------------------------------------------------------------- agent: oversized input refusal
+// ---------------------------------------------------------------- llm: usage honesty
 
-test('an input larger than the context window is refused up front, history untouched', async () => {
-  const llm = new ScriptedLLM([new LLMResponse('should never be consumed')])
-  // empty toolset: the fixed system/tool-schema overhead must not eat the
-  // tiny test window on its own
-  const agent = new Agent({ llm, tools: [], maxContextTokens: 1000 })
-  const answer = await drain(agent.chat('x'.repeat(30_000)))
-  assert.match(answer, /larger than the 1000-token context window/)
-  assert.equal(agent.messages.length, 0, 'the oversized message must not enter the history')
-  // the model was never called — the scripted turn is still unconsumed
-  const next = await drain(agent.chat('hello'))
-  assert.equal(next, 'should never be consumed')
+test('usageSeen flips only when the provider actually reports usage', async () => {
+  const originalFetch = globalThis.fetch
+  const chunk = (extra: string) =>
+    `{"id":"1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"a"}}]${extra}}`
+  try {
+    globalThis.fetch = (async () => sseResponse([chunk('')])) as typeof fetch
+    const noUsage = new LLM({ model: 'm', apiKey: 'k' })
+    await drain(noUsage.chat([{ role: 'user', content: 'hi' }]))
+    assert.equal(noUsage.usageSeen, false, 'no usage chunk → stays unknown')
+
+    globalThis.fetch = (async () =>
+      sseResponse([chunk(',"usage":{"prompt_tokens":5,"completion_tokens":2}')])) as typeof fetch
+    const withUsage = new LLM({ model: 'm', apiKey: 'k' })
+    await drain(withUsage.chat([{ role: 'user', content: 'hi' }]))
+    assert.equal(withUsage.usageSeen, true)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
 })
 
 // ---------------------------------------------------------------- agent: abandoning during TEXT streaming

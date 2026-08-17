@@ -321,6 +321,12 @@ async function handleCommand(input: string, agent: Agent, config: Config): Promi
     return true
   }
   if (input === '/tokens') {
+    // never dress unknown up as zero: some providers (or the stream_options
+    // fallback) report no usage at all — say so instead of printing 0
+    if (!agent.llm.usageSeen) {
+      console.log(dim('Tokens: unknown — this provider has not reported usage.'))
+      return true
+    }
     const p = agent.llm.totalPromptTokens
     const c = agent.llm.totalCompletionTokens
     let line = `Tokens: ${cyan(String(p))} prompt + ${cyan(String(c))} completion = ${bold(String(p + c))} total`

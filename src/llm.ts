@@ -107,6 +107,8 @@ export interface LLMClient {
   model: string
   totalPromptTokens: number
   totalCompletionTokens: number
+  /** True once any response has carried usage data — /tokens shows 'unknown' until then. */
+  usageSeen: boolean
   readonly estimatedCost: number | null
   chat(
     messages: ChatMessage[],
@@ -156,6 +158,7 @@ export class LLM implements LLMClient {
   model: string
   totalPromptTokens = 0
   totalCompletionTokens = 0
+  usageSeen = false
 
   private apiKey: string
   private baseUrl: string
@@ -243,6 +246,7 @@ export class LLM implements LLMClient {
       // usage info comes in the final chunk; some providers send usage with
       // null fields, so coerce to 0 to keep the running totals numeric
       if (chunk.usage) {
+        this.usageSeen = true
         promptTok = chunk.usage.prompt_tokens ?? 0
         completionTok = chunk.usage.completion_tokens ?? 0
       }
@@ -373,18 +377,14 @@ export class LLM implements LLMClient {
 }
 
 /**
- * Parse a Server-Sent-Events response body into `data:` payload strings,
- * stopping at [DONE]. Handles payloads split across network chunks by
- * buffering the trailing partial line.
+ * Parse a Server-Sent-Events body into `data:` payloads, stopping at
+ * [DONE] and buffering partial lines across network chunks.
  *
- * The per-request timeout in callOnce() only guards until the response
- * headers arrive, and the fetch controller is detached from the user's
- * signal at that point — so the body phase must handle its own
- * cancellation and stalls: an abort cancels the reader (which both
- * unblocks a pending read() and closes the connection, so the provider
- * stops generating into a dead socket), and each read() races an idle
- * timer so a stream that stops producing raises instead of hanging the
- * turn forever.
+ * The body phase owns its own cancellation and stalls — callOnce's timeout
+ * only guards until the headers arrive. An abort cancels the reader
+ * (unblocking a pending read and closing the connection); each read races
+ * an idle timer. This mirrors httpx's read-timeout semantics, which the
+ * Python original inherited from its SDK for free.
  */
 async function* sseEvents(
   res: Response,
@@ -457,6 +457,8 @@ async function* sseEvents(
 export class ScriptedLLM implements LLMClient {
   totalPromptTokens = 0
   totalCompletionTokens = 0
+  // deterministic playback: its word-count bookkeeping is always "known"
+  usageSeen = true
 
   private turns: LLMResponse[]
 

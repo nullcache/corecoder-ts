@@ -84,18 +84,6 @@ export class Agent {
    * Yields progress events; returns the model's final text answer.
    */
   async *chat(userInput: string, signal?: AbortSignal): AsyncGenerator<AgentEvent, string> {
-    // A single message larger than the whole context window can never be
-    // sent — no compression layer can shrink *one* message, so it would just
-    // 413 on every turn. Refuse up front and keep it out of the history.
-    // measure() includes the fixed system-prompt/tool-schema overhead.
-    const inputTokens = this.context.measure([{ role: 'user', content: userInput }])
-    if (inputTokens > this.context.maxTokens) {
-      return (
-        `Error: this message is ~${inputTokens} tokens, larger than the ` +
-        `${this.context.maxTokens}-token context window. Shorten the input or raise CORECODER_MAX_CONTEXT.`
-      )
-    }
-
     this.messages.push({ role: 'user', content: userInput })
     await this.context.maybeCompress(this.messages, this.llm, signal)
 

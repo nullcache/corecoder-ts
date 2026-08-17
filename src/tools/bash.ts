@@ -94,32 +94,21 @@ const MAX_OUTPUT = 16 * 1024 * 1024
  * (process-group leader), so a negative pid kills the group; Windows has no
  * groups, so use taskkill /T to walk the tree.
  */
-function killProcessTree(child: ChildProcess, escalateMs = 5000): NodeJS.Timeout | null {
-  if (!child.pid) return null
+function killProcessTree(child: ChildProcess): void {
+  if (!child.pid) return
   if (process.platform === 'win32') {
     spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
-    return null // /F is already forceful
+    return
   }
-  const pgid = child.pid
+  // SIGKILL, not SIGTERM: a request can be ignored (`trap '' TERM`) and a
+  // wedged child would hang the turn forever. Python's subprocess.run does
+  // the same on timeout — kill() outright — except it only reaches the
+  // direct child; killing the group is that behavior, hardened.
   try {
-    process.kill(-pgid, 'SIGTERM')
+    process.kill(-child.pid, 'SIGKILL')
   } catch {
-    child.kill() // process group already gone — nothing left to kill
-    return null
+    child.kill('SIGKILL') // process group already gone — best effort
   }
-  // SIGTERM is only a request — a `trap '' TERM` shell or a wedged process
-  // ignores it, 'close' never fires, and the turn hangs forever. Escalate to
-  // SIGKILL after a grace period; the caller clears the timer if the process
-  // exits in time (so a reused pgid can never be killed by mistake).
-  const timer = setTimeout(() => {
-    try {
-      process.kill(-pgid, 'SIGKILL')
-    } catch {
-      // already gone
-    }
-  }, escalateMs)
-  timer.unref()
-  return timer
 }
 
 function runShell(
@@ -143,17 +132,6 @@ function runShell(
     let truncated = false
     let timedOut = false
     let settled = false
-    let killTimer: NodeJS.Timeout | null = null
-    let killStarted = false
-
-    // the TERM→KILL sequence runs at most once, no matter how many triggers
-    // fire (abort then timeout, etc.) — a second call would orphan the first
-    // escalation timer, which settle() could then never clear
-    const beginKill = () => {
-      if (killStarted) return
-      killStarted = true
-      killTimer = killProcessTree(child)
-    }
 
     const settle = (result: {
       stdout: string
@@ -165,21 +143,20 @@ function runShell(
       if (settled) return
       settled = true
       clearTimeout(timer)
-      if (killTimer) clearTimeout(killTimer)
       signal?.removeEventListener('abort', onAbort)
       resolve(result)
     }
 
-    const onAbort = () => beginKill()
+    const onAbort = () => killProcessTree(child)
     if (signal?.aborted) {
-      beginKill()
+      killProcessTree(child)
     } else {
       signal?.addEventListener('abort', onAbort, { once: true })
     }
 
     const timer = setTimeout(() => {
       timedOut = true
-      beginKill()
+      killProcessTree(child)
     }, timeoutMs)
 
     // keep consuming even past the cap so the pipe drains and close can fire

@@ -10,6 +10,10 @@
  *
  * Cheapest first: layer 1 costs no model call, layer 2 keeps the recent
  * tail verbatim, layer 3 only fires near the hard limit.
+ *
+ * Token accounting principle: estimate before the call (a decision must be
+ * made ahead of time); trust provider usage after it; degrade explicitly
+ * when usage is absent — never dress unknown up as zero.
  */
 
 import type { ChatMessage, LLMClient } from './llm.js'
@@ -79,6 +83,8 @@ export class ContextManager {
    * the ratio means.
    */
   observe(realPromptTokens: number, messages: ChatMessage[]): void {
+    // no usage from the provider → the ratio keeps its last value
+    // (initially 1 = pure char/3, the Python original's behavior)
     if (realPromptTokens <= 0) return
     const est = estimateTokens(messages) + this.fixedTokens
     if (est > 0) this.ratio = realPromptTokens / est
