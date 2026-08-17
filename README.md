@@ -24,8 +24,8 @@ commentary on *why* it's shaped that way.
 - **Real tools, real filesystem** — bash, read/write/edit, glob, grep, and a sub-agent tool, with
   Claude Code-style unique-match file editing and cwd tracking across commands.
 - **Context compression** — a 3-layer strategy (snip verbose tool output → LLM summary → hard
-  collapse) calibrated against the API's reported `prompt_tokens`, so the char-based estimate
-  stays honest.
+  collapse) driven by a static UTF-8-byte estimate (~3 bytes per token), so CJK and ASCII text
+  are both sized sensibly without any calibration machinery.
 - **Session persistence** — save and resume conversations from disk.
 - **No dependencies at runtime** — the OpenAI SDK appears only as a type-only dev dependency.
 - **Works with any OpenAI-compatible API** — OpenAI, DeepSeek, Ollama, LM Studio, etc.
@@ -162,10 +162,10 @@ Three layers, cheapest first:
 2. **Summarize** old turns with the LLM, keeping the recent tail verbatim
 3. **Hard collapse** near the hard limit — summary + last few messages only
 
-The char-based token estimate is calibrated against the API's reported `prompt_tokens` after each
-round, which absorbs CJK text density. The fixed system-prompt/tool-schema overhead is counted as a
-separate additive term, so the calibration ratio stays a pure chars-to-tokens rate and survives
-compression.
+Sizing uses a static UTF-8-byte estimate (~3 bytes per token): ASCII lands at ~3 chars/token and
+CJK at ~1 char/token, with the fixed system-prompt/tool-schema overhead added on top. Provider
+`usage` is post-hoc accounting only (see `/tokens`) and never feeds the estimate — the two datasets
+never meet.
 
 ### Sessions (`src/session.ts`)
 
@@ -216,8 +216,8 @@ scripts/        cross-version test runner (node --test glob expansion is Node 21
 
 This is a faithful port of the Python [CoreCoder](https://github.com/he-yufeng/CoreCoder), with a
 few deliberate upgrades — most notably the async-generator event stream (the Python version uses
-`on_token`/`on_tool` callbacks), a streaming markdown renderer, and real `prompt_tokens` calibration
-for context compression. The design commentary throughout references the Claude Code mechanisms
+`on_token`/`on_tool` callbacks), a streaming markdown renderer, and a UTF-8-byte token estimate
+that sizes CJK text sensibly. The design commentary throughout references the Claude Code mechanisms
 being distilled and the Python original being ported.
 
 ## License

@@ -117,6 +117,9 @@ test('aborting mid-stream rejects promptly instead of being swallowed', async ()
     const t0 = Date.now()
     await assert.rejects(turn, (e: Error) => e.name === 'AbortError')
     assert.ok(Date.now() - t0 < 2000, 'abort must not wait for more data')
+    // the torn-down stream never delivered usage — the finally must have
+    // marked the running totals incomplete (post-loop code never runs here)
+    assert.equal(llm.usageMissed, true, 'aborted stream must mark totals incomplete')
   } finally {
     globalThis.fetch = originalFetch
   }
@@ -211,12 +214,29 @@ test('usageSeen flips only when the provider actually reports usage', async () =
     const noUsage = new LLM({ model: 'm', apiKey: 'k' })
     await drain(noUsage.chat([{ role: 'user', content: 'hi' }]))
     assert.equal(noUsage.usageSeen, false, 'no usage chunk → stays unknown')
+    assert.equal(noUsage.usageMissed, true, 'a usage-less response marks the totals incomplete')
+
+    // a usage OBJECT with null fields is not data either
+    globalThis.fetch = (async () =>
+      sseResponse([chunk(',"usage":{"prompt_tokens":null,"completion_tokens":null}')])) as typeof fetch
+    const nullUsage = new LLM({ model: 'm', apiKey: 'k' })
+    await drain(nullUsage.chat([{ role: 'user', content: 'hi' }]))
+    assert.equal(nullUsage.usageSeen, false, 'null-field usage must not dress unknown up as 0')
+
+    // partial usage (only one number) does not count either — both or nothing
+    globalThis.fetch = (async () =>
+      sseResponse([chunk(',"usage":{"prompt_tokens":5,"completion_tokens":null}')])) as typeof fetch
+    const partialUsage = new LLM({ model: 'm', apiKey: 'k' })
+    await drain(partialUsage.chat([{ role: 'user', content: 'hi' }]))
+    assert.equal(partialUsage.usageSeen, false, 'partial usage is not complete data')
+    assert.equal(partialUsage.usageMissed, true)
 
     globalThis.fetch = (async () =>
       sseResponse([chunk(',"usage":{"prompt_tokens":5,"completion_tokens":2}')])) as typeof fetch
     const withUsage = new LLM({ model: 'm', apiKey: 'k' })
     await drain(withUsage.chat([{ role: 'user', content: 'hi' }]))
     assert.equal(withUsage.usageSeen, true)
+    assert.equal(withUsage.usageMissed, false)
   } finally {
     globalThis.fetch = originalFetch
   }
@@ -251,6 +271,41 @@ test('abandoning chat() during text streaming closes the SSE connection', async 
     // break awaits the generator chain's return(), so teardown must have
     // fully completed by this line — no sleep allowed
     assert.equal(cancelled, true, 'the SSE body must be cancelled by the time break returns')
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('usage received before an abort is still booked — complete ledger, real numbers', async () => {
+  // timeline: the complete usage chunk arrives, then the connection dies
+  // before [DONE]. The finally must book the numbers, not just skip the
+  // incomplete mark — otherwise the ledger claims completeness with 0s.
+  let controllerRef: ReadableStreamDefaultController<Uint8Array> | undefined
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controllerRef = controller
+      controller.enqueue(
+        new TextEncoder().encode(
+          'data: {"id":"1","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2}}\n\n',
+        ),
+      )
+      // never send [DONE]
+    },
+  })
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = (async () =>
+    new Response(body, { headers: { 'content-type': 'text/event-stream' } })) as typeof fetch
+  try {
+    const llm = new LLM({ model: 'm', apiKey: 'k' })
+    const ac = new AbortController()
+    const turn = drain(llm.chat([{ role: 'user', content: 'hi' }], undefined, ac.signal))
+    setTimeout(() => ac.abort(), 100)
+    await assert.rejects(turn, (e: Error) => e.name === 'AbortError')
+    assert.equal(llm.usageSeen, true)
+    assert.equal(llm.usageMissed, false, 'complete usage arrived — the ledger is not incomplete')
+    assert.equal(llm.totalPromptTokens, 5, 'the received numbers must be booked despite the abort')
+    assert.equal(llm.totalCompletionTokens, 2)
+    void controllerRef
   } finally {
     globalThis.fetch = originalFetch
   }

@@ -66,8 +66,8 @@ export class Agent {
     }
 
     // the API bills for the system prompt and tool schemas on every call;
-    // count them as fixed overhead so the compressor's calibration doesn't
-    // underestimate once the conversation gets shrunk (see context.ts)
+    // count them as fixed overhead so the static estimate doesn't
+    // undersize requests once the conversation gets shrunk (see context.ts)
     this.context.setFixedOverhead(this.system + '\n' + JSON.stringify(this.toolSchemas()))
   }
 
@@ -150,12 +150,6 @@ export class Agent {
         if (!step?.done) await stream.return(undefined as unknown as LLMResponse)
       }
       const resp = step!.value as LLMResponse
-
-      // Calibrate the compressor's char-based estimate against the real
-      // prompt_tokens the API just billed for. Must happen before pushing
-      // the reply: `messages` still equals what the request was built from,
-      // so the real count and the estimate describe the same snapshot.
-      this.context.observe(resp.promptTokens, this.messages)
 
       this.messages.push(resp.toMessage())
 

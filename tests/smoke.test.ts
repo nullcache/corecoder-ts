@@ -318,26 +318,18 @@ test('read_file caps line width so one-line giants cannot flood the context', as
   await fs.rm(dir, { recursive: true, force: true })
 })
 
-test('context: observed real usage calibrates the estimate and changes decisions', async () => {
-  // snipAt = 1000. Build messages whose char estimate (~690) sits below the
-  // threshold, but whose "real" usage (as a CJK-heavy conversation would
-  // report) is 3x the estimate — above it.
+test('context: a CJK-heavy history is sized correctly without any calibration', async () => {
+  // snipAt = 1000 (maxTokens 2000). The estimate is UTF-8 bytes over three,
+  // so CJK text (3 bytes/char) counts ~1 token per char — a history that a
+  // naive chars/3 guess would keep far below the threshold triggers layer 1
+  // here with no calibration machinery at all.
   const cm = new ContextManager(2000)
-  const bigToolOutput = Array.from({ length: 8 }, (_, i) => `line ${i} ` + 'y'.repeat(212)).join('\n')
+  const cjkLines = Array.from({ length: 8 }, (_, i) => `行${i} ` + '汉'.repeat(200)).join('\n')
   const messages: ChatMessage[] = [
-    { role: 'user', content: 'x'.repeat(300) },
-    { role: 'tool', tool_call_id: 't1', content: bigToolOutput },
+    { role: 'user', content: '请总结' },
+    { role: 'tool', tool_call_id: 't1', content: cjkLines },
   ]
-  const est = estimateTokens(messages)
-  assert.ok(est < 1000, `estimate ${est} should start below the snip threshold`)
-
-  // uncalibrated: below threshold, nothing happens
-  assert.equal(await cm.maybeCompress([...messages]), false)
-
-  // the API reports 3x the estimate (CJK reality); now the same messages
-  // measure above the threshold and layer 1 fires
-  cm.observe(est * 3, messages)
-  assert.equal(cm.measure(messages), est * 3)
+  assert.ok(estimateTokens(messages) > 1000, `estimate ${estimateTokens(messages)} must exceed snipAt`)
   const compressed = await cm.maybeCompress(messages)
   assert.equal(compressed, true)
   const tool = messages.find(m => m.role === 'tool')!

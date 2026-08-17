@@ -78,6 +78,8 @@ export interface LLMClient {
   totalCompletionTokens: number
   /** True once any response has carried usage data — /tokens shows 'unknown' until then. */
   usageSeen: boolean
+  /** True once any response finished WITHOUT usage numbers — the totals are then incomplete. */
+  usageMissed?: boolean
   chat(
     messages: ChatMessage[],
     tools?: ToolSchema[],
@@ -127,6 +129,7 @@ export class LLM implements LLMClient {
   totalPromptTokens = 0
   totalCompletionTokens = 0
   usageSeen = false
+  usageMissed = false
 
   private apiKey: string
   private baseUrl: string
@@ -187,47 +190,68 @@ export class LLM implements LLMClient {
     // be reassembled per index before parsing.
     const tcMap = new Map<number, { id: string; name: string; args: string }>()
     let promptTok = 0
+    let sawUsageNumbers = false
     let completionTok = 0
 
-    for await (const data of sseEvents(res, signal, this.timeoutMs)) {
-      // Typed against the official SDK's wire contract (type-only import).
-      // Some "OpenAI-compatible" providers emit non-JSON data lines (heartbeats,
-      // keep-alives, stray whitespace); skip them rather than killing the whole
-      // stream on one malformed chunk.
-      let chunk: ChatCompletionChunk
-      try {
-        chunk = JSON.parse(data) as ChatCompletionChunk
-      } catch {
-        continue
-      }
-
-      // usage info comes in the final chunk; some providers send usage with
-      // null fields, so coerce to 0 to keep the running totals numeric
-      if (chunk.usage) {
-        this.usageSeen = true
-        promptTok = chunk.usage.prompt_tokens ?? 0
-        completionTok = chunk.usage.completion_tokens ?? 0
-      }
-
-      const delta = chunk.choices?.[0]?.delta
-      if (!delta) continue
-
-      if (delta.content) {
-        contentParts.push(delta.content)
-        yield delta.content
-      }
-
-      if (delta.tool_calls) {
-        for (const tcDelta of delta.tool_calls) {
-          let entry = tcMap.get(tcDelta.index)
-          if (!entry) {
-            entry = { id: '', name: '', args: '' }
-            tcMap.set(tcDelta.index, entry)
-          }
-          if (tcDelta.id) entry.id = tcDelta.id
-          if (tcDelta.function?.name) entry.name = tcDelta.function.name
-          if (tcDelta.function?.arguments) entry.args += tcDelta.function.arguments
+    try {
+      for await (const data of sseEvents(res, signal, this.timeoutMs)) {
+        // Typed against the official SDK's wire contract (type-only import).
+        // Some "OpenAI-compatible" providers emit non-JSON data lines (heartbeats,
+        // keep-alives, stray whitespace); skip them rather than killing the whole
+        // stream on one malformed chunk.
+        let chunk: ChatCompletionChunk
+        try {
+          chunk = JSON.parse(data) as ChatCompletionChunk
+        } catch {
+          continue
         }
+
+        // usage info comes in the final chunk. Only a chunk carrying BOTH
+        // numbers counts — a usage object with null or partial fields is
+        // not data, and treating it as data would dress unknown up as 0.
+        if (chunk.usage) {
+          const pt = chunk.usage.prompt_tokens
+          const ct = chunk.usage.completion_tokens
+          if (typeof pt === 'number' && typeof ct === 'number') {
+            this.usageSeen = true
+            sawUsageNumbers = true
+            promptTok = pt
+            completionTok = ct
+          }
+        }
+
+        const delta = chunk.choices?.[0]?.delta
+        if (!delta) continue
+
+        if (delta.content) {
+          contentParts.push(delta.content)
+          yield delta.content
+        }
+
+        if (delta.tool_calls) {
+          for (const tcDelta of delta.tool_calls) {
+            let entry = tcMap.get(tcDelta.index)
+            if (!entry) {
+              entry = { id: '', name: '', args: '' }
+              tcMap.set(tcDelta.index, entry)
+            }
+            if (tcDelta.id) entry.id = tcDelta.id
+            if (tcDelta.function?.name) entry.name = tcDelta.function.name
+            if (tcDelta.function?.arguments) entry.args += tcDelta.function.arguments
+          }
+        }
+      }
+    } finally {
+      // Accumulation and the incomplete mark live in the SAME finally: on
+      // teardown (abort, consumer .return(), stream error) code after the
+      // loop never executes, so booking the numbers there would let a
+      // stream that delivered complete usage and then died claim a
+      // complete ledger with the numbers missing.
+      if (sawUsageNumbers) {
+        this.totalPromptTokens += promptTok
+        this.totalCompletionTokens += completionTok
+      } else {
+        this.usageMissed = true
       }
     }
 
@@ -247,9 +271,6 @@ export class LLM implements LLMClient {
       }
       parsed.push({ id: raw.id, name: raw.name, arguments: args })
     }
-
-    this.totalPromptTokens += promptTok
-    this.totalCompletionTokens += completionTok
 
     return new LLMResponse(contentParts.join(''), parsed, promptTok, completionTok)
   }
