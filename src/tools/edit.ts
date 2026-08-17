@@ -126,7 +126,9 @@ export const editFileTool: Tool = {
         )
       }
 
-      const newContent = content.replace(oldString, newString)
+      // replacement via a function so `$$`, `$&`, `$'` etc. in new_string are
+      // written literally — String.replace interprets them as patterns otherwise
+      const newContent = content.replace(oldString, () => newString)
       await fs.writeFile(p, newContent, 'utf8')
       changedFiles.add(p)
 

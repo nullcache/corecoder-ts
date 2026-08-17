@@ -16,6 +16,9 @@ export function globToRegExp(pattern: string): RegExp {
   // normalize Windows separators so `src\**\*.ts` behaves like `src/**/*.ts`
   // (the walk produces /-joined relative paths, so a literal \ can never match)
   pattern = pattern.replace(/\\/g, '/')
+  // the walked relative paths never start with './', but models write
+  // './src/*.ts' constantly — strip it or the pattern silently matches nothing
+  while (pattern.startsWith('./')) pattern = pattern.slice(2)
   let re = ''
   let i = 0
   while (i < pattern.length) {
@@ -37,6 +40,19 @@ export function globToRegExp(pattern: string): RegExp {
     } else if (ch === '?') {
       re += '[^/]'
       i += 1
+    } else if (ch === '[') {
+      // character class, e.g. `*.[ch]` or `[!abc]` — escaping the brackets
+      // (the old behavior) made such patterns silently match nothing
+      const end = pattern.indexOf(']', i + 2) // i+2: allow ']' as first member
+      if (end !== -1) {
+        let cls = pattern.slice(i + 1, end)
+        if (cls.startsWith('!')) cls = '^' + cls.slice(1)
+        re += '[' + cls.replace(/\\/g, '\\\\') + ']'
+        i = end + 1
+      } else {
+        re += '\\[' // unclosed bracket: treat as a literal
+        i += 1
+      }
     } else {
       re += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&')
       i += 1

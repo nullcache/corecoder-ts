@@ -14,17 +14,16 @@ import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { Tool } from './base.js'
+import { getTrackedCwd, setTrackedCwd } from './paths.js'
 
-// Track cwd across commands (Claude Code does this too). The Python version
-// uses a thread-local because its tools run on a thread pool; in Node all
-// tool executions share one event loop, so a module-level variable has no
-// data race — concurrent bash calls just apply their cd updates in
-// completion order.
-let trackedCwd: string | null = null
+// The tracked cwd lives in paths.ts so that *every* tool resolves relative
+// paths against it (read/write/edit/glob/grep go through expandPath) — with
+// it only known to bash, a `cd src && ...` was followed by read_file
+// resolving against the process cwd, silently reading the wrong tree.
 
 /** Test seam: reset cwd tracking between test cases. */
 export function resetCwdTracking(): void {
-  trackedCwd = null
+  setTrackedCwd(null)
 }
 
 // patterns that could wreck the filesystem or leak secrets
@@ -54,13 +53,15 @@ function checkDangerous(cmd: string): string | null {
 /**
  * Track directory changes from cd commands.
  *
- * Walk each cd in a && chain, resolving relative targets against the dir the
- * previous cd landed in (not the original cwd) so `cd a && cd b` ends in a/b.
+ * Walk each cd in a command chain (&&, ||, ;), resolving relative targets
+ * against the dir the previous cd landed in (not the original cwd) so
+ * `cd a && cd b` ends in a/b. A heuristic, like the Python original — cd
+ * inside quotes or subshells is not our problem to solve here.
  */
 async function updateCwd(command: string, currentCwd: string): Promise<void> {
   let running = currentCwd
   let changed = false
-  for (let part of command.split('&&')) {
+  for (let part of command.split(/&&|\|\||;/)) {
     part = part.trim()
     if (!part.startsWith('cd ')) continue
     let target = part.slice(3).trim().replace(/^['"]|['"]$/g, '')
@@ -78,7 +79,7 @@ async function updateCwd(command: string, currentCwd: string): Promise<void> {
       // target doesn't exist — ignore, same as the Python version
     }
   }
-  if (changed) trackedCwd = running
+  if (changed) setTrackedCwd(running)
 }
 
 // match exec's default maxBuffer so a chatty command can't balloon memory
@@ -94,17 +95,32 @@ const MAX_OUTPUT = 16 * 1024 * 1024
  * (process-group leader), so a negative pid kills the group; Windows has no
  * groups, so use taskkill /T to walk the tree.
  */
-function killProcessTree(child: ChildProcess): void {
-  if (!child.pid) return
+function killProcessTree(child: ChildProcess, escalateMs = 5000): NodeJS.Timeout | null {
+  if (!child.pid) return null
   if (process.platform === 'win32') {
     spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
-    return
+    return null // /F is already forceful
   }
+  const pgid = child.pid
   try {
-    process.kill(-child.pid, 'SIGTERM')
+    process.kill(-pgid, 'SIGTERM')
   } catch {
     child.kill() // process group already gone — nothing left to kill
+    return null
   }
+  // SIGTERM is only a request — a `trap '' TERM` shell or a wedged process
+  // ignores it, 'close' never fires, and the turn hangs forever. Escalate to
+  // SIGKILL after a grace period; the caller clears the timer if the process
+  // exits in time (so a reused pgid can never be killed by mistake).
+  const timer = setTimeout(() => {
+    try {
+      process.kill(-pgid, 'SIGKILL')
+    } catch {
+      // already gone
+    }
+  }, escalateMs)
+  timer.unref()
+  return timer
 }
 
 function runShell(
@@ -128,6 +144,7 @@ function runShell(
     let truncated = false
     let timedOut = false
     let settled = false
+    let killTimer: NodeJS.Timeout | null = null
 
     const settle = (result: {
       stdout: string
@@ -139,20 +156,23 @@ function runShell(
       if (settled) return
       settled = true
       clearTimeout(timer)
+      if (killTimer) clearTimeout(killTimer)
       signal?.removeEventListener('abort', onAbort)
       resolve(result)
     }
 
-    const onAbort = () => killProcessTree(child)
+    const onAbort = () => {
+      killTimer = killProcessTree(child)
+    }
     if (signal?.aborted) {
-      killProcessTree(child)
+      killTimer = killProcessTree(child)
     } else {
       signal?.addEventListener('abort', onAbort, { once: true })
     }
 
     const timer = setTimeout(() => {
       timedOut = true
-      killProcessTree(child)
+      killTimer = killProcessTree(child)
     }, timeoutMs)
 
     // keep consuming even past the cap so the pipe drains and close can fire
@@ -197,7 +217,7 @@ export const bashTool: Tool = {
       return `⚠ Blocked: ${warning}\nCommand: ${command}\nIf intentional, modify the command to be more specific.`
     }
 
-    const cwd = trackedCwd ?? process.cwd()
+    const cwd = getTrackedCwd()
 
     try {
       const { stdout, stderr, code, timedOut, truncated } = await runShell(

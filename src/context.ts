@@ -91,9 +91,22 @@ export class ContextManager {
 
 
   /** Apply compression layers as needed (mutates `messages` in place). */
-  async maybeCompress(messages: ChatMessage[], llm?: LLMClient): Promise<boolean> {
+  async maybeCompress(
+    messages: ChatMessage[],
+    llm?: LLMClient,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
     let current = this.measure(messages)
     let compressed = false
+
+    // Layer 0: a single message so large it alone busts the window can't be
+    // helped by any layer below — layer 1 only snips tool replies, layers
+    // 2/3 are gated on message *count*. Without this, a huge one-shot prompt
+    // 413s on every turn (and /compact can't fix it either).
+    if (current > this.collapseAt && this.truncateOversized(messages)) {
+      compressed = true
+      current = this.measure(messages)
+    }
 
     // Layer 1: snip verbose tool outputs
     if (current > this.snipAt) {
@@ -105,7 +118,7 @@ export class ContextManager {
 
     // Layer 2: LLM-powered summarization of old turns
     if (current > this.summarizeAt && messages.length > 10) {
-      if (await this.summarizeOld(messages, llm, 8)) {
+      if (await this.summarizeOld(messages, llm, 8, signal)) {
         compressed = true
         current = this.measure(messages)
       }
@@ -113,11 +126,34 @@ export class ContextManager {
 
     // Layer 3: hard collapse — last resort
     if (current > this.collapseAt && messages.length > 4) {
-      await this.hardCollapse(messages, llm)
+      await this.hardCollapse(messages, llm, signal)
       compressed = true
     }
 
     return compressed
+  }
+
+  /**
+   * Layer 0: head+tail truncate any single message whose content alone
+   * exceeds the hard-collapse threshold. Rare, but the only exit from an
+   * otherwise-permanent 413 loop.
+   */
+  private truncateOversized(messages: ChatMessage[]): boolean {
+    // budget in chars: the collapse threshold un-scaled back to chars, split
+    // across head and tail. Conservative on purpose.
+    const maxChars = Math.max(2000, Math.floor((this.collapseAt / this.ratio) * 3))
+    let changed = false
+    for (const m of messages) {
+      const content = m.content ?? ''
+      if (typeof content !== 'string' || content.length <= maxChars) continue
+      const half = Math.floor(maxChars / 2)
+      m.content =
+        content.slice(0, half) +
+        `\n... (${content.length} chars, middle truncated to fit the context window) ...\n` +
+        content.slice(-half)
+      changed = true
+    }
+    return changed
   }
 
   /**
@@ -160,6 +196,7 @@ export class ContextManager {
     messages: ChatMessage[],
     llm: LLMClient | undefined,
     keepRecent = 8,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     if (messages.length <= keepRecent) return false
 
@@ -167,7 +204,7 @@ export class ContextManager {
     const old = messages.slice(0, split)
     const tail = messages.slice(split)
 
-    const summary = await this.getSummary(old, llm)
+    const summary = await this.getSummary(old, llm, signal)
 
     messages.length = 0
     messages.push({
@@ -183,10 +220,14 @@ export class ContextManager {
   }
 
   /** Layer 3: emergency compression. Keep only last 4 messages + summary. */
-  private async hardCollapse(messages: ChatMessage[], llm?: LLMClient): Promise<void> {
+  private async hardCollapse(
+    messages: ChatMessage[],
+    llm?: LLMClient,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const split = this.safeSplit(messages, messages.length > 4 ? 4 : 2)
     const tail = messages.slice(split)
-    const summary = await this.getSummary(messages.slice(0, split), llm)
+    const summary = await this.getSummary(messages.slice(0, split), llm, signal)
 
     messages.length = 0
     messages.push({ role: 'user', content: `[Hard context reset]\n${summary}` })
@@ -198,11 +239,17 @@ export class ContextManager {
   }
 
   /** Generate a summary via the LLM, falling back to plain extraction. */
-  private async getSummary(messages: ChatMessage[], llm?: LLMClient): Promise<string> {
+  private async getSummary(
+    messages: ChatMessage[],
+    llm?: LLMClient,
+    signal?: AbortSignal,
+  ): Promise<string> {
     const flat = this.flatten(messages)
 
     if (llm) {
       try {
+        // the signal makes the summarization call — and its retry backoffs —
+        // cancellable; without it a ^C is dead for the whole compression
         const resp = await drain(
           llm.chat([
             {
@@ -215,11 +262,13 @@ export class ContextManager {
                 'redundant back-and-forth.',
             },
             { role: 'user', content: flat.slice(0, 15_000) },
-          ]),
+          ], undefined, signal),
         )
         return resp.content
-      } catch {
-        // fall through to extraction
+      } catch (e) {
+        // cancellation is control flow, not a summarization failure
+        if (e instanceof Error && e.name === 'AbortError') throw e
+        // anything else: fall through to extraction
       }
     }
 
